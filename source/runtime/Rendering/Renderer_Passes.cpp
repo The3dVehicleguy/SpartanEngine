@@ -855,6 +855,45 @@ namespace spartan
         cmd_list->EndTimeblock();
     }
 
+    void Renderer::Pass_ParallaxOcclusionMapping(RHI_CommandList* cmd_list)
+    {
+        if (!GetOption<bool> (Renderer_Option::OcclusionCulling))
+            return;
+
+        // acquire resources
+        RHI_Texture* tex_color = GetRenderTarget (Renderer_RenderTarget::gbuffer_color);
+        RHI_Texture* tex_normal = GetRenderTarget (Renderer_RenderTarget::gbuffer_normal);
+        RHI_Texture* tex_material = GetRenderTarget (Renderer_RenderTarget::gbuffer_material);
+        RHI_Texture* tex_depth = GetRenderTarget (Renderer_RenderTarget::gbuffer_depth);
+
+        cmd_list->BeginTimeblock ("parallax_occlusion_mapping");
+        {
+            // set pipeline state
+            RHI_PipelineState pso;
+            pso.name = "parallax_occlusion_mapping";
+            pso.shaders[RHI_Shader_Type::Vertex] = GetShader (Renderer_Shader::gbuffer_v);
+            pso.shaders[RHI_Shader_Type::Pixel] = GetShader (Renderer_Shader::gbuffer_p);
+            pso.blend_state = GetBlendState (Renderer_BlendState::Off);
+            pso.rasterizer_state = GetOption<bool> (Renderer_Option::Wireframe) ? GetRasterizerState (Renderer_RasterizerState::Wireframe) : GetRasterizerState (Renderer_RasterizerState::Solid);
+            pso.depth_stencil_state = GetDepthStencilState (Renderer_DepthStencilState::ReadWrite) : GetDepthStencilState (Renderer_DepthStencilState::ReadEqual);
+            pso.vrs_input_texture = GetOption<bool> (Renderer_Option::VariableRateShading) ? GetRenderTarget (Renderer_RenderTarget::shading_rate) : nullptr;
+            pso.resolution_scale = true;
+            pso.render_target_color_textures[0] = tex_color;
+            pso.render_target_color_textures[1] = tex_normal;
+            pso.render_target_color_textures[2] = tex_material;
+            pso.render_target_color_textures[3] = tex_velocity;
+            pso.render_target_depth_texture = tex_depth;
+            pso.clear_color[0] = is_transparent_pass ? rhi_color_load : Color::standard_transparent;
+            pso.clear_color[1] = is_transparent_pass ? rhi_color_load : Color::standard_transparent;
+            pso.clear_color[2] = is_transparent_pass ? rhi_color_load : Color::standard_transparent;
+            pso.clear_color[3] = is_transparent_pass ? rhi_color_load : Color::standard_transparent;
+            cmd_list->SetPipelineState (pso);
+            // set textures
+            cmd_list->SetTexture (Renderer_BindingsSrv::tex, GetRenderTarget (Renderer_RenderTarget::gbuffer_depth)); // read
+            cmd_list->SetTexture (Renderer_BindingsUav::tex_sss, tex_sss);                                               // write
+        }
+    }
+
     void Renderer::Pass_Skysphere(RHI_CommandList* cmd_list)
     {
         RHI_Texture* tex_skysphere              = GetRenderTarget(Renderer_RenderTarget::skysphere);
