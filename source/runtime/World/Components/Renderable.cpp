@@ -19,19 +19,21 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-//= INCLUDES ============================
+//= INCLUDES ================================
 #include "pch.h"
 #include "Renderable.h"
 #include "Camera.h"
 #include "../Entity.h"
 #include "../RHI/RHI_Buffer.h"
+#include "../RHI/RHI_Device.h"
+#include "../RHI/RHI_AccelerationStructure.h"
 #include "../../Resource/ResourceCache.h"
 #include "../../Rendering/Renderer.h"
 #include "../../Rendering/Material.h"
 SP_WARNINGS_OFF
 #include "../IO/pugixml.hpp"
 SP_WARNINGS_ON
-//=======================================
+//===========================================
 
 //= NAMESPACES ===============
 using namespace std;
@@ -40,187 +42,30 @@ using namespace spartan::math;
 
 namespace spartan
 {
-    namespace
-    {
-        template <typename T>
-        static void hash_combine(size_t& seed, const T& v)
-        {
-            std::hash<T> hasher;
-            seed ^= hasher(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
-        }
-    }
-
-    namespace grid_partitioning
-    {
-        // partitions instances into grid cells to enable spatial splitting and culling of non-visible chunks during instanced draws
-
-        const uint32_t cell_size = 300; // meters
-    
-        struct GridKey
-        {
-            int32_t x, y, z;
-        
-            bool operator==(const GridKey& other) const
-            {
-                return x == other.x && y == other.y && z == other.z;
-            }
-
-            // deterministic chunk ordering
-            bool operator<(const GridKey& other) const
-            {
-                if (x != other.x) return x < other.x;
-                if (y != other.y) return y < other.y;
-                return z < other.z;
-            }
-        };
-
-        struct GridKeyHash
-        {
-            size_t operator()(const GridKey& k) const
-            {
-                size_t seed = 0;
-                hash_combine(seed, k.x);
-                hash_combine(seed, k.y);
-                hash_combine(seed, k.z);
-                return seed;
-            }
-        
-            static GridKey get_key(const Vector3& position)
-            {
-                return
-                {
-                    static_cast<int32_t>(std::floor(position.x / static_cast<float>(cell_size))),
-                    static_cast<int32_t>(std::floor(position.y / static_cast<float>(cell_size))),
-                    static_cast<int32_t>(std::floor(position.z / static_cast<float>(cell_size)))
-                };
-            }
-        };
-    
-        void reorder_instances_into_cell_chunks(vector<Matrix>& instance_transforms, vector<uint32_t>& cell_end_indices)
-        {
-            // populate the grid map
-            unordered_map<GridKey, vector<Matrix>, GridKeyHash> grid_map;
-            for (const auto& instance : instance_transforms)
-            {
-                Vector3 position = instance.GetTranslation();
-    
-                GridKey key = GridKeyHash::get_key(position);
-                grid_map[key].push_back(instance);
-            }
-    
-            // reorder instances based on grid map
-            instance_transforms.clear();
-            cell_end_indices.clear();
-            uint32_t index = 0;
-            for (const auto& [key, transforms] : grid_map)
-            {
-                instance_transforms.insert(instance_transforms.end(), transforms.begin(), transforms.end());
-                index += static_cast<uint32_t>(transforms.size());
-                cell_end_indices.push_back(index);
-            }
-        }
-    }
-
-    namespace instancing
-    {
-        string generate_instance_key(const vector<math::Matrix>& transforms, const string& renderable_name)
-        {
-            size_t hash_val = transforms.size();
-            for (const auto& m : transforms)
-            {
-                const float* data = m.Data();
-                for (int j = 0; j < 16; ++j)
-                {
-                    uint32_t bits;
-                    std::memcpy(&bits, &data[j], sizeof(float));
-                    hash_combine(hash_val, bits);
-                }
-            }
-            return renderable_name + "_" + std::to_string(hash_val);
-        }
-
-        struct InstanceData
-        {
-            vector<math::Matrix> transforms;
-            vector<uint32_t> group_end_indices;
-            shared_ptr<RHI_Buffer> buffer;
-        };
-        
-        static unordered_map<string, weak_ptr<InstanceData>> instance_cache;
-        
-        shared_ptr<InstanceData> get_or_create_instance_data(const vector<math::Matrix>& transforms, const string& renderable_name)
-        {
-            if (transforms.empty())
-            {
-                return nullptr;  // or throw/log, depending on your error handling
-            }
-        
-            string key = generate_instance_key(transforms, renderable_name);
-            auto it = instance_cache.find(key);
-            if (it != instance_cache.end())
-            {
-                auto data = it->second.lock();  // try to get strong ref
-                if (data)
-                {
-                    SP_LOG_INFO("Reusing instance data for %s (key: %s)", renderable_name.c_str(), key.c_str());
-                    return data;
-                }
-                else
-                {
-                    // expired, clean up
-                    instance_cache.erase(it);
-                }
-            }
-        
-            // create new
-            auto data = make_shared<InstanceData>();
-            data->transforms = transforms;
-            grid_partitioning::reorder_instances_into_cell_chunks(data->transforms, data->group_end_indices);
-        
-            // transpose for row-major
-            vector<math::Matrix> instances_transposed;
-            instances_transposed.reserve(data->transforms.size());
-            for (const auto& instance : data->transforms)
-            {
-                instances_transposed.push_back(instance.Transposed());
-            }
-        
-            // create buffer
-            data->buffer = make_shared<RHI_Buffer>(
-                RHI_Buffer_Type::Instance,
-                sizeof(instances_transposed[0]),
-                static_cast<uint32_t>(instances_transposed.size()),
-                static_cast<void*>(instances_transposed.data()),
-                false,
-                ("instance_buffer_" + renderable_name).c_str()
-            );
-        
-            // log
-            SP_LOG_INFO("Created instance data for %s: instances=%zu, groups=%zu, buffer_size=%u", 
-                        renderable_name.c_str(), data->transforms.size(), data->group_end_indices.size(), data->buffer->GetElementCount());
-        
-            // onsert weak_ptr
-            instance_cache[key] = data;
-        
-            return data;
-        }
-    }
-
     Renderable::Renderable(Entity* entity) : Component(entity)
     {
-        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_material_default,  bool);
-        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_material,          Material*);
-        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_flags,             uint32_t);
-        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_mesh,              Mesh*);
-        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_bounding_box,      BoundingBox);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_material_default, bool);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_material, Material*);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_flags, uint32_t);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_mesh, Mesh*);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_bounding_box, BoundingBox);
         SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_bounding_box_mesh, BoundingBox);
-        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_sub_mesh_index,    uint32_t);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_sub_mesh_index, uint32_t);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_bounding_box_dirty, bool);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_instances, vector<Instance>);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_instance_buffer, shared_ptr<RHI_Buffer>);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_transform_previous, Matrix);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_max_distance_render, float);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_max_distance_shadow, float);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_distance_squared, float);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_is_visible, bool);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_lod_index, uint32_t);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_previous_lights, uint64_t);
     }
 
     Renderable::~Renderable()
     {
         m_mesh = nullptr;
-        instancing::instance_cache.clear(); // not ideal as it's shared among all renderables
     }
 
     void Renderable::Save(pugi::xml_node& node)
@@ -242,15 +87,15 @@ namespace spartan
     
         // instances
         pugi::xml_node instances_node = node.append_child("Instances");
-        for (const auto& transform : m_instances)
+        for (const auto& instance : m_instances)
         {
             pugi::xml_node t_node = instances_node.append_child("Transform");
-            const float* data = transform.Data();
+            math::Matrix matrix = instance.GetMatrix();
             std::stringstream ss;
-            for (int i = 0; i < 16; i++)
-            {
-                ss << data[i] << (i < 15 ? " " : "");
-            }
+            ss << matrix.m00 << " " << matrix.m01 << " " << matrix.m02 << " " << matrix.m03 << " "
+               << matrix.m10 << " " << matrix.m11 << " " << matrix.m12 << " " << matrix.m13 << " "
+               << matrix.m20 << " " << matrix.m21 << " " << matrix.m22 << " " << matrix.m23 << " "
+               << matrix.m30 << " " << matrix.m31 << " " << matrix.m32 << " " << matrix.m33;
             t_node.append_attribute("matrix") = ss.str().c_str();
         }
     }
@@ -258,16 +103,16 @@ namespace spartan
     void Renderable::Load(pugi::xml_node& node)
     {
         // mesh
-        const std::string mesh_name = node.attribute("mesh_name").as_string();
-        m_sub_mesh_index            = node.attribute("sub_mesh_index").as_uint();
+        const string mesh_name = node.attribute("mesh_name").as_string();
+        m_sub_mesh_index       = node.attribute("sub_mesh_index").as_uint();
         if (!mesh_name.empty())
         {
             m_mesh = ResourceCache::GetByName<Mesh>(mesh_name).get();
         }
     
         // material
-        m_material_default = node.attribute("material_default").as_bool(true);
-        const std::string material_name = node.attribute("material_name").as_string();
+        m_material_default         = node.attribute("material_default").as_bool(true);
+        const string material_name = node.attribute("material_name").as_string();
         if (!material_name.empty() && !m_material_default)
         {
             m_material = ResourceCache::GetByName<Material>(material_name).get();
@@ -292,12 +137,22 @@ namespace spartan
             for (pugi::xml_node t_node : instances_node.children("Transform"))
             {
                 std::stringstream ss(t_node.attribute("matrix").as_string());
+                math::Matrix matrix;
                 float m[16];
-                for (int i = 0; i < 16; i++)
+                for (int i = 0; i < 16; ++i)
                 {
                     ss >> m[i];
                 }
-                m_instances.emplace_back(math::Matrix(m));
+                if (!ss.fail())
+                {
+                    matrix = math::Matrix(m[0], m[1], m[2], m[3],
+                        m[4], m[5], m[6], m[7],
+                        m[8], m[9], m[10], m[11],
+                        m[12], m[13], m[14], m[15]);
+                    Instance instance;
+                    instance.SetMatrix(matrix);
+                    m_instances.emplace_back(instance);
+                }
             }
         }
     
@@ -308,67 +163,13 @@ namespace spartan
         }
         else if (m_mesh)
         {
-            OnTick();
+            Tick();
         }
     }
 
-    void Renderable::OnTick()
+    void Renderable::Tick()
     {
-        // update bounding boxes on transform change
-        if (Entity* entity = GetEntity())
-        {
-            // wait for model loading to finish and entity activation before reading its transform, as accessing it prematurely can cause NaNs and trigger an assertion
-            if (entity->GetActive())
-            { 
-                const Matrix& transform = entity->GetMatrix();
-
-                if (m_bounding_box_dirty || m_transform_previous != transform)
-                {
-                    // bounding box that contains all instances
-                    if (m_instances.empty())
-                    {
-                        m_bounding_box = m_bounding_box_mesh * transform;
-                    }
-                    else // transformed instances
-                    {
-                        m_bounding_box = BoundingBox(Vector3::Infinity, Vector3::InfinityNeg);
-                        m_bounding_box_instances.clear();
-                        m_bounding_box_instances.reserve(m_instances.size());
-                        m_bounding_box_instances.resize(m_instances.size());
-                        for (uint32_t i = 0; i < static_cast<uint32_t>(m_instances.size()); i++)
-                        {
-                            const Matrix& instance_transform = m_instances[i];
-                            m_bounding_box_instances[i]      = m_bounding_box_mesh * (transform * instance_transform); // 1. bounding box of the instance
-                            m_bounding_box.Merge(m_bounding_box_instances[i]);                                         // 2. bounding box of all instances
-                        }
-
-                        // bounding boxes of instance groups
-                        {
-                            // loop through each group end index
-                            m_bounding_box_instance_group.clear();
-                            uint32_t start_index = 0;
-                            for (const uint32_t group_end_index : m_instance_group_end_indices)
-                            {
-                                // loop through the instances in this group
-                                BoundingBox bounding_box_group = BoundingBox(Vector3::Infinity, Vector3::InfinityNeg);
-                                for (uint32_t i = start_index; i < group_end_index; i++)
-                                {
-                                    BoundingBox bounding_box_instance = m_bounding_box_mesh * (transform * m_instances[i]);
-                                    bounding_box_group.Merge(bounding_box_instance);
-                                }
-
-                                m_bounding_box_instance_group.push_back(bounding_box_group);
-                                start_index = group_end_index;
-                            }
-                        }
-                    }
-
-                    m_transform_previous = transform;
-                    m_bounding_box_dirty = false;
-                }
-            }
-        }
-
+        UpdateAabb();
         UpdateFrustumAndDistanceCulling();
         UpdateLodIndices();
     }
@@ -391,7 +192,7 @@ namespace spartan
             m_bounding_box_mesh = BoundingBox(vertices.data(), static_cast<uint32_t>(vertices.size()));
         }
 
-        OnTick(); // update bounding boxes, frustum and distance culling
+        Tick(); // update bounding boxes, frustum and distance culling
     }
 
     void Renderable::SetMesh(const MeshType type)
@@ -431,7 +232,7 @@ namespace spartan
             float min_width  = FLT_MAX;
             float max_width  = -FLT_MAX;
 
-            Matrix transform = HasInstancing() ? GetEntity()->GetMatrix() * GetInstanceTransform(0) : GetEntity()->GetMatrix();
+            Matrix transform = HasInstancing() ? GetInstance(0, true) : GetEntity()->GetMatrix();
             for (const RHI_Vertex_PosTexNorTan& vertex : vertices)
             {
                 Vector3 position = Vector3(vertex.pos[0], vertex.pos[1], vertex.pos[2]);
@@ -511,31 +312,80 @@ namespace spartan
         return m_mesh->GetObjectName();
     }
 
-    uint32_t Renderable::GetInstanceGroupStartIndex(uint32_t group_index) const
+    void Renderable::BuildAccelerationStructure(RHI_CommandList* cmd_list)
     {
-        return group_index == 0 ? 0 : m_instance_group_end_indices[group_index - 1];
-    }
-    
-    uint32_t Renderable::GetInstanceGroupCount(uint32_t group_index) const
-    {
-        uint32_t start_index = GetInstanceGroupStartIndex(group_index);
-        uint32_t end_index   = m_instance_group_end_indices[group_index];
+        if (!m_mesh)
+            return;
 
-        return end_index - start_index;
+        m_mesh->BuildAccelerationStructure(cmd_list);
+    }
+
+    bool Renderable::HasAccelerationStructure() const
+    {
+        if (!m_mesh)
+            return false;
+
+        return m_mesh->GetBlas() != nullptr;
+    }
+
+    uint64_t Renderable::GetAccelerationStructureDeviceAddress() const
+    {
+        if (!m_mesh)
+            return 0;
+
+        return m_mesh->GetBlas()->GetDeviceAddress();
+    }
+
+    Matrix Renderable::GetInstance(const uint32_t index, const bool to_world)
+    {
+        return to_world ? m_instances[index].GetMatrix() * GetEntity()->GetMatrix() : m_instances[index].GetMatrix();
+    }
+
+    void Renderable::SetInstances(const vector<Instance>& instances)
+    {
+        if (instances.empty())
+        {
+            m_instances.clear();
+            m_instance_buffer    = nullptr;
+            m_bounding_box_dirty = true;
+            return;
+        }
+
+        // store instance data
+        m_instances = instances;
+        m_instance_buffer = make_shared<RHI_Buffer>(
+            RHI_Buffer_Type::Instance,
+            sizeof(Instance),
+            static_cast<uint32_t>(instances.size()),
+            static_cast<const void*>(instances.data()),
+            false,
+            ("instance_buffer_" + GetObjectName()).c_str()
+        );
+
+        m_bounding_box_dirty = true;
+        Tick(); // update bounding boxes, frustum and distance culling
     }
 
     void Renderable::SetInstances(const vector<Matrix>& transforms)
     {
-        shared_ptr<instancing::InstanceData> instance_data = instancing::get_or_create_instance_data(transforms, GetEntity()->GetObjectName());
-        m_instances                                        = instance_data->transforms;
-        m_instance_group_end_indices                       = instance_data->group_end_indices;
-        m_instance_buffer                                  = instance_data->buffer;
-        m_bounding_box_dirty                               = true;
-    }
+        if (transforms.empty())
+        {
+            SetInstances(vector<Instance>{});
+            return;
+        }
 
-    void Renderable::SetInstance(const uint32_t index, const math::Matrix& transform)
-    {
-        m_instances[index] = transform;
+        // convert matrices to instances
+        vector<Instance> instances;
+        instances.reserve(transforms.size());
+        for (const auto& transform : transforms)
+        {
+            Instance instance;
+            instance.SetMatrix(transform);
+            instances.emplace_back(instance);
+        }
+
+        // call instance overload
+        SetInstances(instances);
     }
 
     uint32_t Renderable::GetLodCount() const
@@ -565,136 +415,157 @@ namespace spartan
         }
     }
 
+    void Renderable::UpdateAabb()
+    {
+        const Matrix transform = (GetEntity() && GetEntity()->GetActive()) ? GetEntity()->GetMatrix() : Matrix::Identity;
+        if (m_bounding_box_dirty || m_transform_previous != transform)
+        {
+            if (m_instances.empty()) // non-instanced
+            {
+                m_bounding_box = m_bounding_box_mesh * transform;
+            }
+            else // instanced
+            {
+                m_bounding_box = BoundingBox(Vector3::Infinity, Vector3::InfinityNeg);
+                for (const Instance& instance : m_instances)
+                {
+                    Matrix world_instance = instance.GetMatrix() * transform;
+                    m_bounding_box.Merge(m_bounding_box_mesh * world_instance);
+                }
+            }
+            m_transform_previous = transform;
+            m_bounding_box_dirty = false;
+        }
+    }
+
     void Renderable::UpdateFrustumAndDistanceCulling()
     {
         if (Camera* camera = World::GetCamera())
         {
             Vector3 camera_position = camera->GetEntity()->GetPosition();
     
-            if (HasInstancing())
-            {
-                for (uint32_t group_index = 0; group_index < GetInstanceGroupCount(); group_index++)
-                {
-                    const BoundingBox& bounding_box = GetBoundingBoxInstanceGroup(group_index);
+            const BoundingBox& bounding_box = GetBoundingBox();
 
-                    // first, check if the bounding box is in the frustum
-                    if (camera->IsInViewFrustum(bounding_box))
-                    {
-                        // only if in frustum, calculate distance
-                        m_distance_squared[group_index] = Vector3::DistanceSquared(camera_position, bounding_box.GetClosestPoint(camera_position));
-                        m_is_visible[group_index]       = m_distance_squared[group_index] <= m_max_distance_render * m_max_distance_render;
-                    }
-                    else
-                    {
-                        // outside frustum, no need for distance check
-                        m_is_visible[group_index] = false;
-                    }
-                }
+            // first, check if the bounding box is in the frustum
+            if (camera->IsInViewFrustum(bounding_box))
+            {
+                // only if in frustum, calculate distance
+                m_distance_squared = Vector3::DistanceSquared(camera_position, bounding_box.GetClosestPoint(camera_position));
+                m_is_visible       = m_distance_squared <= m_max_distance_render * m_max_distance_render;
             }
             else
             {
-                const BoundingBox& bounding_box = GetBoundingBox();
-
-                // first, check if the bounding box is in the frustum
-                if (camera->IsInViewFrustum(bounding_box))
-                {
-                    // only if in frustum, calculate distance
-                    m_distance_squared[0] = Vector3::DistanceSquared(camera_position, bounding_box.GetClosestPoint(camera_position));
-                    m_is_visible[0]       = m_distance_squared[0]  <= m_max_distance_render * m_max_distance_render;
-                }
-                else
-                {
-                    // outside frustum, no need for distance check
-                    m_is_visible[0] = false;
-                }
+                // outside frustum, no need for distance check
+                m_is_visible = false;
             }
         }
         else
         {
-            m_distance_squared.fill(0.0f);
-            m_is_visible.fill(true);
+            m_distance_squared = 0.0f;
+            m_is_visible       = true;
         }
     }
 
     void Renderable::UpdateLodIndices()
     {
-        // note: using projected angle for LOD selection, which is more perceptually accurate
-        // than screen height ratio, for example it will be more consistent across different resolutions
-    
-        // thresholds for projected angle (defined in degrees, converted to radians)
-        static const array<float, 4> lod_angle_thresholds =
+        const uint32_t lod_count = GetLodCount();
+        if (lod_count == 0)
         {
-            23.0f * math::deg_to_rad,
-            11.5f * math::deg_to_rad,
-            5.7f  * math::deg_to_rad,
-            2.9f  * math::deg_to_rad
-        };
-        const uint32_t lod_count  = GetLodCount();
-        const uint32_t max_lod    = lod_count > 0 ? lod_count - 1 : 0;
-        Camera* camera            = World::GetCamera();
-    
-        // if no camera, use lowest detail lod for all
-        if (!camera)
-        {
-            m_lod_indices.fill(max_lod);
+            m_lod_index = 0;
             return;
         }
-    
-        // lambda to compute lod index using projected angle
-        const Vector3 camera_position = camera->GetEntity()->GetPosition();
-        auto compute_lod_index = [&](const BoundingBox& box, bool is_visible, uint32_t index)
+
+        Camera* camera = World::GetCamera();
+        if (!camera)
         {
-            // if not visible, use lowest detail lod
-            if (!is_visible)
-            {
-                m_lod_indices[index] = max_lod;
-                return;
-            }
-    
-            // compute bounding sphere from aabb for radius
-            float radius = box.GetExtents().Length(); // radius is length of extents vector
-    
-            // compute distance from camera to closest point on AABB
-            Vector3 closest_point = box.GetClosestPoint(camera_position);
-            Vector3 to_closest    = closest_point - camera_position;
-            float distance        = to_closest.Length();
+            m_lod_index = lod_count - 1; // lowest lod
+            return;
+        }
 
-            // if camera is inside or very close to the AABB, use highest detail lod
-            if (box.Contains(camera_position))
-            {
-                m_lod_indices[index] = 0;
-                return;
-            }
-    
-            // compute projected angle (in radians) using the sphere approximation
-            float projected_angle = 2.0f * atan(radius / distance);
+        const BoundingBox& box        = GetBoundingBox();
+        const Vector3 camera_position = camera->GetEntity()->GetPosition();
+        Vector3 closest_point         = box.GetClosestPoint(camera_position);
+        float distance                = (closest_point - camera_position).Length();
+        if (box.Contains(camera_position))
+        {
+            m_lod_index = 0; // inside: max detail
+            return;
+        }
 
-            // determine lod index based on projected angle
-            uint32_t lod_index = max_lod;
-            for (uint32_t i = 0; i < max_lod; i++)
+        // hysteresis: relax threshold for downgrade to prevent popping
+        const float hysteresis_factor = (m_lod_index < lod_count - 1) ? 1.1f : 1.0f;
+
+        uint32_t lod_index = lod_count - 1; // default: lowest lod
+        bool is_grass      = m_material && m_material->GetProperty(MaterialProperty::IsGrassBlade) != 0.0f;
+        if (is_grass)
+        {
+            static const array<float, 3> grass_distance_thresholds =
             {
-                if (projected_angle > lod_angle_thresholds[i])
+                20.0f, // lod0: (high detail, 5 segments)
+                40.0f, // lod1: (medium, 3 segments)
+                80.0f  // lod2: (low, 1 segment)
+            };
+            for (uint32_t i = 0; i < min(lod_count, static_cast<uint32_t>(grass_distance_thresholds.size())); i++)
+            {
+                if (distance < grass_distance_thresholds[i] * hysteresis_factor)
                 {
                     lod_index = i;
                     break;
                 }
             }
-    
-            m_lod_indices[index] = lod_index;
-        };
-    
-        if (HasInstancing())
-        {
-            for (uint32_t group_index = 0; group_index < GetInstanceGroupCount(); group_index++)
-            {
-                const BoundingBox& box = GetBoundingBoxInstanceGroup(group_index);
-                compute_lod_index(box, IsVisible(group_index), group_index);
-            }
         }
         else
         {
-            const BoundingBox& box = GetBoundingBox();
-            compute_lod_index(box, IsVisible(), 0);
+            // hybrid: compute lod from angle and distance, take max index (lower detail)
+
+            // 1. angle-based lod (unchanged)
+            uint32_t lod_angle = lod_count - 1;
+            static const array<float, 5> lod_angle_thresholds =
+            {
+                4.0f * deg_to_rad,
+                3.0f * deg_to_rad,
+                2.5f * deg_to_rad,
+                1.7f * deg_to_rad,
+                0.86f * deg_to_rad
+            };
+            float radius          = box.GetExtents().Length();
+            float projected_angle = 2.0f * atan(radius / distance);
+            for (uint32_t i = 0; i < min(lod_count, static_cast<uint32_t>(lod_angle_thresholds.size())); i++)
+            {
+                float threshold = lod_angle_thresholds[i] * hysteresis_factor;
+                if (projected_angle > threshold)
+                {
+                    lod_angle = i;
+                    break;
+                }
+            }
+
+            // 2. distance-based lod
+            uint32_t lod_dist = lod_count - 1;
+            static const array<float, 5> lod_distance_thresholds =
+            {
+                100.0f,  // lod0
+                150.0f,  // lod1
+                300.0f,  // lod2
+                500.0f,  // lod3
+                700.0f   // lod4
+            };
+
+            // scale thresholds by object size (large objects keep detail longer)
+            float radius_scale = clamp(radius / 50.0f, 1.0f, 2.0f); // 50m radius = 1x, 100m = 2x
+            for (uint32_t i = 0; i < min(lod_count, static_cast<uint32_t>(lod_distance_thresholds.size())); i++)
+            {
+                float threshold = lod_distance_thresholds[i] * radius_scale * hysteresis_factor;
+                if (distance < threshold)
+                {
+                    lod_dist = i;
+                    break;
+                }
+            }
+
+            // 3. hybrid: take max index (lower detail wins)
+            lod_index = max(lod_angle, lod_dist);
         }
+        m_lod_index = clamp(lod_index, 0u, lod_count - 1);
     }
 }

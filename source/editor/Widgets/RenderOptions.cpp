@@ -284,6 +284,13 @@ void RenderOptions::OnTickVisible()
                     option_value(label.c_str(), Renderer_Option::Sharpness, tooltip.c_str(), 0.1f, 0.0f, 1.0f);
                 }
 
+                if (option("Ray-traced Effects"))
+                {
+                    ImGui::BeginDisabled(!RHI_Device::IsSupportedRayTracing());
+                    option_check_box("Reflections (WIP)", Renderer_Option::RayTracedReflections);
+                    ImGui::EndDisabled();
+                }
+
                 if (option("Screen-space Effects"))
                 {
                     option_check_box("Reflections (SSR)", Renderer_Option::ScreenSpaceReflections);
@@ -309,7 +316,9 @@ void RenderOptions::OnTickVisible()
                 if (option("Display"))
                 {
                     option_check_box("HDR", Renderer_Option::Hdr, "Enable high dynamic range output");
+                    ImGui::BeginDisabled(Renderer::GetOption<bool>(Renderer_Option::Hdr));
                     option_value("Gamma", Renderer_Option::Gamma);
+                    ImGui::EndDisabled();
                     option_value("Exposure adaptation speed", Renderer_Option::AutoExposureAdaptationSpeed, "Negative value disables adaptation");
 
                     bool hdr_enabled = Renderer::GetOption<bool>(Renderer_Option::Hdr);
@@ -378,7 +387,7 @@ void RenderOptions::OnTickVisible()
 
                     bool changed = false;
                     changed |= ImGui::SliderFloat("Strength", &strength, 0.1f, 10.0f, "%.1f");
-                    changed |= ImGui::SliderFloat("Direction (deg)", &direction, 0.0f, 180.0f, "%.1f");
+                    changed |= ImGui::SliderFloat("Direction (deg)", &direction, 0.0f, 360.0f, "%.1f");
 
                     if (changed)
                     {

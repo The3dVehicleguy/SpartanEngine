@@ -32,6 +32,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 namespace spartan
 {
     class RHI_Buffer;
+    class RHI_AccelerationStructure;
+    class RHI_CommandList;
 
     enum class MeshFlags : uint32_t
     {
@@ -46,8 +48,9 @@ namespace spartan
 
     enum class MeshLodDropoff
     {
-        Exponential,
-        Linear,
+        Exponential, // slow early, fast late poly reduction (t^2), detail-heavy mid-range
+        Linear,      // medium reduction across LODs (t), balanced for general use
+        Aggressive,  // fast early, slow late reduction (sqrt(t)), optimizes distant objects
         Max
     };
 
@@ -106,6 +109,7 @@ namespace spartan
 
         // gpu buffers
         void CreateGpuBuffers();
+        void BuildAccelerationStructure(RHI_CommandList* cmd_list);
         RHI_Buffer* GetIndexBuffer()  { return m_index_buffer.get();  }
         RHI_Buffer* GetVertexBuffer() { return m_vertex_buffer.get(); }
 
@@ -121,6 +125,9 @@ namespace spartan
         uint32_t GetFlags() const { return m_flags; }
         static uint32_t GetDefaultFlags();
 
+        // acceleration structure
+        RHI_AccelerationStructure* GetBlas() const { return m_blas.get(); }
+
     private:
         // geometry
         std::vector<RHI_Vertex_PosTexNorTan> m_vertices; // all vertices of a model file
@@ -128,13 +135,14 @@ namespace spartan
         std::vector<SubMesh> m_sub_meshes;               // tracks sub-meshes and lods within the above vectors
 
         // gpu buffers
-        std::shared_ptr<RHI_Buffer> m_vertex_buffer;
-        std::shared_ptr<RHI_Buffer> m_index_buffer;
+        std::unique_ptr<RHI_Buffer> m_vertex_buffer;
+        std::unique_ptr<RHI_Buffer> m_index_buffer;
+        std::unique_ptr<RHI_AccelerationStructure> m_blas;
 
         // misc
         std::mutex m_mutex;
         Entity* m_root_entity        = nullptr;
         MeshType m_type              = MeshType::Max;
-        MeshLodDropoff m_lod_dropoff = MeshLodDropoff::Exponential;
+        MeshLodDropoff m_lod_dropoff = MeshLodDropoff::Linear;
     };
 }

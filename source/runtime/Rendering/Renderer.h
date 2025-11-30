@@ -63,7 +63,7 @@ namespace spartan
         static void Shutdown();
         static void Tick();
 
-        // primitive rendering (useful for debugging)
+        // primitive rendering (development & debugging)
         static void DrawLine(const math::Vector3& from, const math::Vector3& to, const Color& color_from = Color::standard_renderer_lines, const Color& color_to = Color::standard_renderer_lines);
         static void DrawTriangle(const math::Vector3& v0, const math::Vector3& v1, const math::Vector3& v2, const Color& color = Color::standard_renderer_lines);
         static void DrawBox(const math::BoundingBox& box, const Color& color = Color::standard_renderer_lines);
@@ -90,7 +90,7 @@ namespace spartan
         static void SetStandardResources(RHI_CommandList* cmd_list);
         static uint64_t GetFrameNumber();
         static RHI_Api_Type GetRhiApiType();
-        static void Screenshot(const std::string& file_path);
+        static void Screenshot();
         static RHI_CommandList* GetCommandListPresent() { return m_cmd_list_present; }
 
         // wind
@@ -123,6 +123,7 @@ namespace spartan
         static RHI_Shader* GetShader(const Renderer_Shader type);
         static RHI_Buffer* GetBuffer(const Renderer_Buffer type);
         static RHI_Texture* GetStandardTexture(const Renderer_StandardTexture type);
+        static RHI_AccelerationStructure* GetTopLevelAccelerationStructure();
         static std::shared_ptr<Mesh>& GetStandardMesh(const MeshType type);
         static std::shared_ptr<Font>& GetFont();
         static std::shared_ptr<Material>& GetStandardMaterial();
@@ -153,6 +154,7 @@ namespace spartan
         static void Pass_GBuffer(RHI_CommandList* cmd_list, const bool is_transparent_pass);
         static void Pass_ScreenSpaceAmbientOcclusion(RHI_CommandList* cmd_list);
         static void Pass_TransparencyReflectionRefraction(RHI_CommandList* cmd_list);
+        static void Pass_RayTracedReflections(RHI_CommandList* cmd_list);
         static void Pass_ScreenSpaceShadows(RHI_CommandList* cmd_list);
         static void Pass_ParallaxOcclusionMapping (RHI_CommandList* cmd_list);
         static void Pass_Skysphere(RHI_CommandList* cmd_list);
@@ -201,6 +203,19 @@ namespace spartan
         static void DestroyResources();
         static void UpdateShadowAtlas();
         static void UpdateDrawCalls(RHI_CommandList* cmd_list);
+        static void UpdateAccelerationStructures(RHI_CommandList* cmd_list);
+
+        // draw calls
+        static std::array<Renderer_DrawCall, renderer_max_draw_calls> m_draw_calls;
+        static uint32_t m_draw_call_count;
+        static std::array<Renderer_DrawCall, renderer_max_draw_calls> m_draw_calls_prepass;
+        static uint32_t m_draw_calls_prepass_count;
+
+        // bindless
+        static std::array<RHI_Texture*, rhi_max_array_size> m_bindless_textures;
+        static std::array<Sb_Light, rhi_max_array_size> m_bindless_lights;
+        static std::array<Sb_Aabb, rhi_max_array_size> m_bindless_aabbs;
+        static bool m_bindless_samplers_dirty;
 
         // misc
         static Cb_Frame m_cb_frame_cpu;
@@ -211,16 +226,9 @@ namespace spartan
         static uint32_t m_resource_index;
         static std::atomic<bool> m_initialized_resources;
         static std::mutex m_mutex_renderables;
-        static std::array<Renderer_DrawCall, renderer_max_draw_calls> m_draw_calls;
-        static uint32_t m_draw_call_count;
         static bool m_transparents_present;
         static RHI_CommandList* m_cmd_list_present;
         static std::vector<ShadowSlice> m_shadow_slices;
-
-        // bindless
-        static std::array<RHI_Texture*, rhi_max_array_size> m_bindless_textures;
-        static std::array<Sb_Light, rhi_max_array_size> m_bindless_lights;
-        static std::array<Sb_Aabb, rhi_max_array_size> m_bindless_aabbs;
-        static bool m_bindless_samplers_dirty;
+        static std::unique_ptr<RHI_Buffer> m_std_reflections; // it temporarily lives here
     };
 }

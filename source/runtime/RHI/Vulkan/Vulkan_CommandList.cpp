@@ -86,8 +86,8 @@ namespace spartan
 
     namespace image_barrier
     {
-        static unordered_map<void*, array<RHI_Image_Layout, rhi_max_mip_count>> image_layouts;
-        static mutex image_layouts_mutex;
+        unordered_map<void*, array<RHI_Image_Layout, rhi_max_mip_count>> image_layouts;
+        mutex image_layouts_mutex;
 
         RHI_Image_Layout get_layout(void* image, uint32_t mip_index)
         {
@@ -287,7 +287,10 @@ namespace spartan
             uint32_t dynamic_offset_count = 0;
             layout->GetDynamicOffsets(&dynamic_offsets, &dynamic_offset_count);
 
-            VkPipelineBindPoint bind_point = pso.IsCompute() ? VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE : VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS;
+            VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+            bind_point                     = pso.IsGraphics()   ? VK_PIPELINE_BIND_POINT_GRAPHICS        : bind_point;
+            bind_point                     = pso.IsRayTracing() ? VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR : bind_point;
+
             vkCmdBindDescriptorSets
             (
                 static_cast<VkCommandBuffer>(resource),               // commandBuffer
@@ -311,7 +314,10 @@ namespace spartan
                 resources[i] = RHI_Device::GetDescriptorSet(static_cast<RHI_Device_Bindless_Resource>(i));
             }
 
-            VkPipelineBindPoint bind_point = pso.IsCompute() ? VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE : VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_GRAPHICS;
+            VkPipelineBindPoint bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+            bind_point                     = pso.IsGraphics()   ? VK_PIPELINE_BIND_POINT_GRAPHICS        : bind_point;
+            bind_point                     = pso.IsRayTracing() ? VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR : bind_point;
+
             vkCmdBindDescriptorSets
             (
                 static_cast<VkCommandBuffer>(resource),               // commandBuffer
@@ -330,7 +336,7 @@ namespace spartan
     {
         namespace timestamp
         {
-            const uint32_t query_count = 128;
+            const uint32_t query_count = 256;
             array<uint64_t, query_count> data;
 
             void update(void* query_pool)
@@ -425,6 +431,26 @@ namespace spartan
             RHI_Device::DeletionQueueAdd(RHI_Resource_Type::QueryPool, pool_timestamp);
             RHI_Device::DeletionQueueAdd(RHI_Resource_Type::QueryPool, pool_occlusion);
             RHI_Device::DeletionQueueAdd(RHI_Resource_Type::QueryPool, pool_pipeline_statistics);
+        }
+    }
+
+    namespace immediate_execution
+    {
+        mutex mutex_execution;
+        condition_variable condition_var;
+        bool is_executing = false;
+        array<shared_ptr<RHI_Queue>, static_cast<uint32_t>(RHI_Queue_Type::Max)> queues; // graphics, compute, and copy
+        once_flag init_flag;
+    
+        // initialize queues on first use
+        void ensure_initialized()
+        {
+            call_once(init_flag, []()
+            {
+                queues[static_cast<uint32_t>(RHI_Queue_Type::Graphics)] = make_shared<RHI_Queue>(RHI_Queue_Type::Graphics, "graphics");
+                queues[static_cast<uint32_t>(RHI_Queue_Type::Compute)]  = make_shared<RHI_Queue>(RHI_Queue_Type::Compute,  "compute");
+                queues[static_cast<uint32_t>(RHI_Queue_Type::Copy)]     = make_shared<RHI_Queue>(RHI_Queue_Type::Copy,     "copy");
+            });
         }
     }
 
@@ -580,7 +606,9 @@ namespace spartan
             SP_ASSERT(vk_pipeline != nullptr);
 
             // bind
-            VkPipelineBindPoint pipeline_bind_point = m_pso.IsCompute() ? VK_PIPELINE_BIND_POINT_COMPUTE : VK_PIPELINE_BIND_POINT_GRAPHICS;
+            VkPipelineBindPoint pipeline_bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
+            pipeline_bind_point                     = m_pso.IsGraphics()   ? VK_PIPELINE_BIND_POINT_GRAPHICS        : pipeline_bind_point;
+            pipeline_bind_point                     = m_pso.IsRayTracing() ? VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR : pipeline_bind_point;
             vkCmdBindPipeline(static_cast<VkCommandBuffer>(m_rhi_resource), pipeline_bind_point, vk_pipeline);
             Profiler::m_rhi_bindings_pipeline++;
 
@@ -602,8 +630,9 @@ namespace spartan
                 SetScissorRectangle(scissor_rect);
 
                 // vertex and index buffer state
-                m_buffer_id_index  = 0;
-                m_buffer_id_vertex = 0;
+                m_buffer_id_index    = 0;
+                m_buffer_id_vertex   = 0;
+                m_buffer_id_instance = 0;
             }
 
             if (Debugging::IsBreadcrumbsEnabled())
@@ -621,6 +650,42 @@ namespace spartan
             Renderer::SetStandardResources(this);
             descriptor_sets::set_dynamic(m_pso, m_rhi_resource, m_pipeline->GetRhiResourceLayout(), m_descriptor_layout_current);
         }
+    }
+
+    RHI_CommandList* RHI_CommandList::ImmediateExecutionBegin(const RHI_Queue_Type queue_type)
+    {
+        immediate_execution::ensure_initialized();
+    
+        // wait until it's safe to proceed
+        unique_lock<mutex> lock(immediate_execution::mutex_execution);
+        immediate_execution::condition_var.wait(lock, [] { return !immediate_execution::is_executing; });
+        immediate_execution::is_executing = true;
+    
+        // get command list
+        RHI_Queue* queue          = immediate_execution::queues[static_cast<uint32_t>(queue_type)].get();
+        RHI_CommandList* cmd_list = queue->NextCommandList();
+        cmd_list->Begin();
+        return cmd_list;
+    }
+    
+    void RHI_CommandList::ImmediateExecutionEnd(RHI_CommandList* cmd_list)
+    {
+        cmd_list->Submit(nullptr, true);
+        cmd_list->WaitForExecution();
+    
+        // signal that it's safe to proceed with the next ImmediateBegin
+        immediate_execution::is_executing = false;
+        immediate_execution::condition_var.notify_one();
+    }
+
+    void RHI_CommandList::ImmediateExecutionShutdown()
+    {
+        // wait for ongoing operations to complete
+        unique_lock<mutex> lock(immediate_execution::mutex_execution);
+        immediate_execution::condition_var.wait(lock, [] { return !immediate_execution::is_executing; });
+
+        // now release memory
+        immediate_execution::queues.fill(nullptr);
     }
 
     void RHI_CommandList::RenderPassBegin()
@@ -762,8 +827,12 @@ namespace spartan
         {
             m_load_color_render_targets[i] = false;
         }
-        m_render_pass_active     = true;
-        m_render_pass_draw_calls = 0;
+        m_render_pass_active = true;
+    }
+
+    void* RHI_CommandList::GetRhiResourcePipeline()
+    {
+        return m_pipeline->GetRhiResource();
     }
 
     void RHI_CommandList::RenderPassEnd()
@@ -773,7 +842,6 @@ namespace spartan
     
         vkCmdEndRendering(static_cast<VkCommandBuffer>(m_rhi_resource));
         m_render_pass_active = false;
-        //SP_ASSERT_MSG(m_render_pass_draw_calls != 0, "No draw calls were made within the render pass, this wastes GPU resources");
     }
 
     void RHI_CommandList::ClearPipelineStateRenderTargets(RHI_PipelineState& pipeline_state)
@@ -899,7 +967,6 @@ namespace spartan
             0                                             // firstInstance
         );
         Profiler::m_rhi_draw++;
-        m_render_pass_draw_calls++;
     }
 
     void RHI_CommandList::DrawIndexed(const uint32_t index_count, const uint32_t index_offset, const uint32_t vertex_offset, const uint32_t instance_index, const uint32_t instance_count)
@@ -907,11 +974,6 @@ namespace spartan
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
 
         PreDraw();
-
-        if (Debugging::IsBreadcrumbsEnabled())
-        {
-            //RHI_AMD_FFX::Breadcrumbs_MarkerBegin(this, AMD_FFX_Marker::DrawIndexed, m_pso.name);
-        }
 
         vkCmdDrawIndexed(
             static_cast<VkCommandBuffer>(m_rhi_resource), // commandBuffer
@@ -922,12 +984,7 @@ namespace spartan
             instance_index                                // firstInstance
         );
         Profiler::m_rhi_draw++;
-        m_render_pass_draw_calls++;
-
-        if (Debugging::IsBreadcrumbsEnabled())
-        {
-            //RHI_AMD_FFX::Breadcrumbs_MarkerEnd(this);
-        }
+        Profiler::m_rhi_instance_count += instance_count == 1 ? 0 : instance_count;
     }
 
     void RHI_CommandList::Dispatch(uint32_t x, uint32_t y, uint32_t z /*= 1*/)
@@ -936,27 +993,55 @@ namespace spartan
 
         PreDraw();
 
-        if (Debugging::IsBreadcrumbsEnabled())
-        {
-            //RHI_AMD_FFX::Breadcrumbs_MarkerBegin(this, AMD_FFX_Marker::Dispatch, m_pso.name);
-        }
-
         vkCmdDispatch(static_cast<VkCommandBuffer>(m_rhi_resource), x, y, z);
+    }
 
-        if (Debugging::IsBreadcrumbsEnabled())
+    void RHI_CommandList::TraceRays(const uint32_t width, const uint32_t height, RHI_Buffer* shader_binding_table)
+    {
+        SP_ASSERT(shader_binding_table && shader_binding_table->GetType() == RHI_Buffer_Type::ShaderBindingTable);
+
+        // load extension func once
+        static PFN_vkCmdTraceRaysKHR pfn_vk_cmd_trace_rays_khr = nullptr;
+        if (!pfn_vk_cmd_trace_rays_khr)
         {
-            //RHI_AMD_FFX::Breadcrumbs_MarkerEnd(this);
+            pfn_vk_cmd_trace_rays_khr = (PFN_vkCmdTraceRaysKHR)vkGetDeviceProcAddr(RHI_Context::device, "vkCmdTraceRaysKHR");
+            SP_ASSERT(pfn_vk_cmd_trace_rays_khr != nullptr);
         }
+
+        // get regions
+        RHI_StridedDeviceAddressRegion raygen_region = shader_binding_table->GetRegion(RHI_Shader_Type::RayGeneration);
+        RHI_StridedDeviceAddressRegion miss_region   = shader_binding_table->GetRegion(RHI_Shader_Type::RayMiss);
+        RHI_StridedDeviceAddressRegion hit_region    = shader_binding_table->GetRegion(RHI_Shader_Type::RayHit);
+
+        // convert to vulkan regions
+        VkStridedDeviceAddressRegionKHR vk_raygen   = { raygen_region.device_address, raygen_region.stride, raygen_region.size };
+        VkStridedDeviceAddressRegionKHR vk_miss     = { miss_region.device_address, miss_region.stride, miss_region.size };
+        VkStridedDeviceAddressRegionKHR vk_hit      = { hit_region.device_address, hit_region.stride, hit_region.size };
+        VkStridedDeviceAddressRegionKHR vk_callable = {};
+    
+        pfn_vk_cmd_trace_rays_khr(
+            static_cast<VkCommandBuffer>(m_rhi_resource), // commandBuffer
+            &vk_raygen,                                   // pRaygenShaderBindingTable
+            &vk_miss,                                     // pMissShaderBindingTable
+            &vk_hit,                                      // pHitShaderBindingTable
+            &vk_callable,                                 // pCallableShaderBindingTable
+            width,                                        // width
+            height,                                       // height
+            1                                             // depth
+        );
     }
 
     void RHI_CommandList::Blit(RHI_Texture* source, RHI_Texture* destination, const bool blit_mips, const float source_scaling)
     {
-        SP_ASSERT_MSG((source->GetFlags() & RHI_Texture_ClearBlit) != 0,      "Blit requires the texture to be created with the RHI_Texture_ClearOrBlit flag");
-        SP_ASSERT_MSG((destination->GetFlags() & RHI_Texture_ClearBlit) != 0, "Blit requires the texture to be created with the RHI_Texture_ClearOrBlit flag");
+        SP_ASSERT_MSG(source && destination,                                                                                                        "Source and destination textures cannot be null");
+        SP_ASSERT_MSG((source->GetFlags() & RHI_Texture_ClearBlit) != 0,                                                                            "Blit requires the texture to be created with the RHI_Texture_ClearOrBlit flag");
+        SP_ASSERT_MSG((destination->GetFlags() & RHI_Texture_ClearBlit) != 0,                                                                       "Blit requires the texture to be created with the RHI_Texture_ClearOrBlit flag");
+        SP_ASSERT_MSG(source->GetChannelCount() == destination->GetChannelCount(),                                                                  "Source and destination must have matching channel counts for blit compatibility");
+        SP_ASSERT_MSG(source->GetBitsPerChannel() == destination->GetBitsPerChannel() || (source->IsColorFormat() && destination->IsColorFormat()), "Source and destination bit depths must match or be convertible color formats");
+        SP_ASSERT_MSG(!source->IsDepthFormat() || !destination->IsDepthFormat() || source->GetFormat() == destination->GetFormat(),                 "Depth formats must be identical for blit");
         if (blit_mips)
         {
-            SP_ASSERT_MSG(source->GetMipCount() == destination->GetMipCount(),
-                "If the mips are blitted, then the mip count between the source and the destination textures must match");
+            SP_ASSERT_MSG(source->GetMipCount() == destination->GetMipCount(), "If the mips are blitted, then the mip count between the source and the destination textures must match");
         }
 
         // compute a blit region for each mip
@@ -1255,7 +1340,7 @@ namespace spartan
         VkDeviceSize offsets[2] = { 0, 0 };
     
         // check if vertex buffer id has changed to trigger binding
-        if (m_buffer_id_vertex != vertex->GetObjectId())
+        if (m_buffer_id_vertex != vertex->GetObjectId() || m_buffer_id_instance != instance->GetObjectId())
         {
             vkCmdBindVertexBuffers(
                 static_cast<VkCommandBuffer>(m_rhi_resource), // commandbuffer
@@ -1265,8 +1350,9 @@ namespace spartan
                 offsets                                       // poffsets
             );
     
-            // update cached vertex buffer id
-            m_buffer_id_vertex = vertex->GetObjectId();
+            // track currently bound buffers
+            m_buffer_id_vertex   = vertex->GetObjectId();
+            m_buffer_id_instance = instance->GetObjectId();
             Profiler::m_rhi_bindings_buffer_vertex++;
         }
     }
@@ -1297,34 +1383,41 @@ namespace spartan
     {
         SP_ASSERT(m_state == RHI_CommandListState::Recording);
         SP_ASSERT(size <= RHI_Device::PropertyGetMaxPushConstantSize());
-
+    
         uint32_t stages = 0;
-
         if (m_pso.shaders[RHI_Shader_Type::Compute])
         {
             stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT;
         }
-
         if (m_pso.shaders[RHI_Shader_Type::Vertex])
         {
             stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_VERTEX_BIT;
         }
-
         if (m_pso.shaders[RHI_Shader_Type::Hull])
         {
             stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
         }
-
         if (m_pso.shaders[RHI_Shader_Type::Domain])
         {
             stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
         }
-
         if (m_pso.shaders[RHI_Shader_Type::Pixel])
         {
             stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_FRAGMENT_BIT;
         }
-
+        if (m_pso.shaders[RHI_Shader_Type::RayGeneration])
+        {
+            stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        }
+        if (m_pso.shaders[RHI_Shader_Type::RayMiss])
+        {
+            stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_MISS_BIT_KHR;
+        }
+        if (m_pso.shaders[RHI_Shader_Type::RayHit])
+        {
+            stages |= VkShaderStageFlagBits::VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+        }
+    
         vkCmdPushConstants(
             static_cast<VkCommandBuffer>(m_rhi_resource),
             static_cast<VkPipelineLayout>(m_pipeline->GetRhiResourceLayout()),
@@ -1423,11 +1516,17 @@ namespace spartan
             }
         }
 
-        // Set (will only happen if it's not already set)
+        // set (will only happen if it's not already set)
         m_descriptor_layout_current->SetTexture(slot, texture, mip_index, mip_range);
 
         // todo: detect if there are changes, otherwise don't bother binding
         descriptor_sets::bind_dynamic = true;
+    }
+
+    void RHI_CommandList::SetAccelerationStructure(Renderer_BindingsSrv slot, RHI_AccelerationStructure* tlas)
+    {
+        SP_ASSERT(m_state == RHI_CommandListState::Recording);
+        m_descriptor_layout_current->SetAccelerationStructure(static_cast<uint32_t>(slot), tlas);
     }
 
     void RHI_CommandList::SetBuffer(const uint32_t slot, RHI_Buffer* buffer) const
@@ -1690,6 +1789,9 @@ namespace spartan
                 case RHI_Buffer_Type::Constant:
                     barrier_after.dstAccessMask |= VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_UNIFORM_READ_BIT;
                     break;
+                case RHI_Buffer_Type::ShaderBindingTable:
+                    barrier_after.dstAccessMask |= VK_ACCESS_2_SHADER_BINDING_TABLE_READ_BIT_KHR;
+                    break;
                 default:
                     SP_ASSERT_MSG(false, "Unknown buffer type");
                     break;
@@ -1944,6 +2046,52 @@ namespace spartan
     RHI_Image_Layout RHI_CommandList::GetImageLayout(void* image, const uint32_t mip_index)
     {
         return image_barrier::get_layout(image, mip_index);
+    }
+
+    void RHI_CommandList::CopyTextureToBuffer(RHI_Texture* source, RHI_Buffer* destination)
+    {
+        SP_ASSERT_MSG(source && destination, "Invalid source/destination");
+        SP_ASSERT_MSG(source->GetWidth() && source->GetHeight(), "Source must have valid dimensions");
+
+        // barrier to transfer src
+        InsertBarrier(
+            source->GetRhiResource(),
+            source->GetFormat(),
+            0,  // mip start
+            1,  // mip count
+            1,  // array length
+            RHI_Image_Layout::Transfer_Source
+        );
+
+        // copy region (single mip/full extent)
+        VkBufferImageCopy region{};
+        region.bufferOffset                    = 0;
+        region.bufferRowLength                 = 0;
+        region.bufferImageHeight               = 0;
+        region.imageSubresource.aspectMask     = get_aspect_mask(source->GetFormat());
+        region.imageSubresource.mipLevel       = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount     = 1;
+        region.imageOffset                     = { 0, 0, 0 };
+        region.imageExtent                     = { static_cast<uint32_t>(source->GetWidth()), static_cast<uint32_t>(source->GetHeight()), 1 };
+
+        vkCmdCopyImageToBuffer(
+            static_cast<VkCommandBuffer>(GetRhiResource()),
+            static_cast<VkImage>(source->GetRhiResource()),
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            static_cast<VkBuffer>(destination->GetRhiResource()),
+            1, &region
+        );
+
+        // barrier back to shader read (or your tracked layout)
+        InsertBarrier(
+            source->GetRhiResource(),
+            source->GetFormat(),
+            0,
+            1,
+            1,
+            RHI_Image_Layout::Shader_Read
+        );
     }
 
     void RHI_CommandList::PreDraw()

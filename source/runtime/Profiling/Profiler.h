@@ -51,12 +51,12 @@ namespace spartan
         static float GetFps();
         static float GetUpdateInterval();
         static void SetUpdateInterval(float interval);
-        static const std::string& GpuGetName();
         static bool IsCpuStuttering();
         static bool IsGpuStuttering();
         
         // metrics - rhi
         static uint32_t m_rhi_draw;
+        static uint32_t m_rhi_instance_count;
         static uint32_t m_rhi_timeblock_count;
         static uint32_t m_rhi_pipeline_barriers;
         static uint32_t m_rhi_bindings_buffer_index;
@@ -79,6 +79,7 @@ namespace spartan
         static void ClearRhiMetrics()
         {
             m_rhi_draw                       = 0;
+            m_rhi_instance_count             = 0;
             m_rhi_timeblock_count            = 0;
             m_rhi_pipeline_barriers          = 0;
             m_rhi_bindings_buffer_index      = 0;
@@ -95,7 +96,6 @@ namespace spartan
             m_rhi_bindings_pipeline          = 0;
         }
 
-        static void AcquireGpuData();
         static void DrawPerformanceMetrics();
         static TimeBlock* GetLastIncompleteTimeBlock(const TimeBlockType type);
     };

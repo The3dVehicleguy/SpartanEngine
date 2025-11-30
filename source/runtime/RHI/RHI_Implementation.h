@@ -244,6 +244,7 @@ static const VkObjectType vulkan_object_type[] =
     VK_OBJECT_TYPE_PIPELINE,
     VK_OBJECT_TYPE_PIPELINE_LAYOUT,
     VK_OBJECT_TYPE_QUEUE,
+    VK_OBJECT_TYPE_ACCELERATION_STRUCTURE_KHR,
     VK_OBJECT_TYPE_UNKNOWN
 };
 
@@ -404,7 +405,7 @@ namespace spartan
         #endif
 
         // api agnostic
-        static const char* api_version_str;
+        static const char* api_version_cstr;
         static const char* api_type_str;
         static RHI_Api_Type api_type;
     };

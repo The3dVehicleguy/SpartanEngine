@@ -163,65 +163,90 @@ void FileDialog::ShowTop(bool* is_visible, Editor* editor)
             {
                 m_history_index++;
                 m_current_path = m_history[m_history_index];
-                m_is_dirty     = true;
+                m_is_dirty = true;
             }
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
 
         // breadcrumb navigation
-        const string root_path    = ResourceCache::GetProjectDirectory();
-        vector<string> path_parts = FileSystem::SplitPath(m_current_path);
-        string accumulated_path   = path_parts[0] + "/"; // start with drive root (e.g., C:/)
+        const char* root_path = ResourceCache::GetProjectDirectory();
+
+        char accumulated_path[1024];
+        accumulated_path[0] = '\0';
+
+        char current_path[1024];
+        strncpy_s(current_path, sizeof(current_path), m_current_path.c_str(), _TRUNCATE);
 
         // show root directory button if not at root
-        if (m_current_path != root_path)
+        if (strcmp(m_current_path.c_str(), root_path) != 0)
         {
-            string root_label = FileSystem::GetFileNameFromFilePath(root_path); // e.g., "project" or root dir name
-            if (root_label.empty()) root_label = "Root"; // fallback label
-            if (ImGuiSp::button(root_label.c_str()))
+            const char* root_label = FileSystem::GetFileNameFromFilePath(root_path).c_str();
+            if (!root_label || root_label[0] == '\0')
+                root_label = "Root";
+
+            if (ImGuiSp::button(root_label))
             {
                 m_current_path = root_path;
                 m_history.push_back(m_current_path);
                 m_history_index = m_history.size() - 1;
-                m_is_dirty      = true;
+                m_is_dirty = true;
             }
             ImGui::SameLine();
             ImGui::Text(">");
             ImGui::SameLine();
         }
 
-        // show remaining path parts
-        for (size_t i = 1; i < path_parts.size(); ++i)
+        // split manually
+        const char* delimiters = "/\\";
+        char* context = nullptr;
+        char* token   = strtok_s(current_path, delimiters, &context);
+        bool first    = true;
+
+        while (token)
         {
-            accumulated_path += path_parts[i] + "/";
-
-            // skip root_path in breadcrumbs if it matches accumulated_path
-            if (FileSystem::GetDirectoryFromFilePath(accumulated_path) == root_path)
-                continue;
-
-            if (ImGuiSp::button(path_parts[i].c_str()))
+            if (first)
             {
-                m_current_path  = accumulated_path;
+                snprintf(accumulated_path, sizeof(accumulated_path), "%s/", token);
+                first = false;
+            }
+            else
+            {
+                strncat_s(accumulated_path, sizeof(accumulated_path), token, _TRUNCATE);
+                strncat_s(accumulated_path, sizeof(accumulated_path), "/", _TRUNCATE);
+            }
+
+            size_t root_len = strlen(root_path);
+            size_t acc_len  = strlen(accumulated_path);
+            if (acc_len == root_len + 1 && accumulated_path[root_len] == '/' && strncmp(accumulated_path, root_path, root_len) == 0)
+            {
+                token = strtok_s(nullptr, delimiters, &context);
+                continue;
+            }
+
+            if (ImGuiSp::button(token))
+            {
+                m_current_path = accumulated_path;
                 m_history.push_back(m_current_path);
                 m_history_index = m_history.size() - 1;
-                m_is_dirty      = true;
+                m_is_dirty = true;
             }
             ImGui::SameLine();
             ImGui::Text(">");
             ImGui::SameLine();
+
+            token = strtok_s(nullptr, delimiters, &context);
         }
     }
 
-    // size slider (only for grid view) + view toggle button
+    // size slider + view toggle
     {
         float button_width = ImGui::CalcTextSize(m_view_mode == View_Grid ? "List View" : "Grid View").x + ImGui::GetStyle().FramePadding.x * 2.0f;
-        float slider_width = m_view_mode == View_Grid ? 150.0f : 0.0f; // allocate space for slider only in grid view
-        float total_width  = button_width + slider_width + ImGui::GetStyle().ItemSpacing.x;
+        float slider_width = m_view_mode == View_Grid ? 150.0f : 0.0f;
+        float total_width = button_width + slider_width + ImGui::GetStyle().ItemSpacing.x;
         float region_width = ImGui::GetContentRegionAvail().x;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + region_width - total_width);
 
-        // slider
         if (m_view_mode == View_Grid)
         {
             ImGui::SetNextItemWidth(slider_width);
@@ -229,7 +254,6 @@ void FileDialog::ShowTop(bool* is_visible, Editor* editor)
             ImGui::SameLine();
         }
 
-        // view mode toggle
         if (ImGuiSp::button(m_view_mode == View_Grid ? "List View" : "Grid View"))
         {
             m_view_mode = (m_view_mode == View_Grid) ? View_List : View_Grid;
@@ -431,27 +455,93 @@ void FileDialog::RenderItem(FileDialogItem* item, const ImVec2& size, bool is_li
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.0f, 1.0f, 1.0f, 0.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 5.0f);
-
     bool button_pressed = false;
     ImRect button_rect;
     if (is_list_view)
     {
         // list view: use selectable for click detection, spans the cell
-        ImGui::BeginGroup(); // group icon + label
         button_pressed = ImGui::Selectable("##selectable", false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick);
-        button_rect    = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        button_rect = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        // render icon if available
+        if (RHI_Texture* texture = item->GetIcon())
+        {
+            if (texture->GetResourceState() == ResourceState::PreparedForGpu)
+            {
+                ImVec2 image_size(static_cast<float>(texture->GetWidth()), static_cast<float>(texture->GetHeight()));
+                ImVec2 image_size_max(32.0f, 32.0f);
+                float scale = min(image_size_max.x / image_size.x, image_size_max.y / image_size.y);
+                image_size.x *= scale;
+                image_size.y *= scale;
+                // Adjust cursor to align icon vertically centered in the row
+                float row_height = ImGui::GetCurrentTable()->RowMinHeight;
+                float icon_y_offset = (row_height - image_size.y) * 0.5f;
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + icon_y_offset);
+                ImGuiSp::image(item->GetIcon(), image_size);
+                ImGui::SameLine();
+            }
+        }
+        // render label
+        ImGui::TextUnformatted(item->GetLabel().c_str());
     }
     else
     {
         // grid view: sized invisible button
         button_pressed = ImGui::InvisibleButton("##dummy", size);
-        button_rect    = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        button_rect = ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+        // hover outline (grid view only)
+        if (ImGui::IsItemHovered() && !is_list_view)
+        {
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+            draw_list->AddRect(
+                button_rect.Min,
+                button_rect.Max,
+                IM_COL32(100, 149, 237, 255),
+                5.0f,
+                0,
+                1.0f);
+        }
+        // drop shadow (grid view only)
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        draw_list->AddRectFilled(
+            ImVec2(button_rect.Min.x - 2.0f, button_rect.Min.y - 2.0f),
+            ImVec2(button_rect.Max.x + 2.0f, button_rect.Max.y + 2.0f),
+            IM_COL32(0, 0, 0, item_background_alpha),
+            5.0f);
+        // render icon if available
+        if (RHI_Texture* texture = item->GetIcon())
+        {
+            if (texture->GetResourceState() == ResourceState::PreparedForGpu)
+            {
+                ImVec2 image_size(static_cast<float>(texture->GetWidth()), static_cast<float>(texture->GetHeight()));
+                const float padding = ImGui::GetStyle().FramePadding.x;
+                ImVec2 image_size_max(button_rect.GetWidth() - padding * 2.0f, button_rect.GetHeight() - padding * 2.0f - ImGui::GetFont()->FontSize - 5.0f);
+                float scale = min(image_size_max.x / image_size.x, image_size_max.y / image_size.y);
+                image_size.x *= scale;
+                image_size.y *= scale;
+                // grid view: center icon
+                ImVec2 image_pos(button_rect.GetCenter().x - image_size.x * 0.5f, button_rect.Min.y + (button_rect.GetHeight() - image_size.y - ImGui::GetFont()->FontSize - 5.0f) * 0.5f);
+                ImGui::SetCursorScreenPos(image_pos);
+                ImGuiSp::image(item->GetIcon(), image_size);
+            }
+        }
+        // render label
+        const ImVec2 label_pos(button_rect.Min.x + ImGui::GetStyle().FramePadding.x, button_rect.Max.y - ImGui::GetFont()->FontSize - ImGui::GetStyle().FramePadding.y - 2.0f);
+        ImGui::SetCursorScreenPos(label_pos);
+        ImGui::RenderTextEllipsis(
+            ImGui::GetWindowDrawList(),
+            label_pos,
+            button_rect.Max,
+            button_rect.Max.x,
+            button_rect.Max.x,
+            item->GetLabel().c_str(),
+            nullptr,
+            nullptr
+        );
     }
-
     if (button_pressed)
     {
         item->Clicked();
-        const bool is_single_click = item->GetTimeSinceLastClickMs() > 500 || is_list_view; // selectable handles double-click separately
+        const bool is_single_click = item->GetTimeSinceLastClickMs() > 500 || is_list_view;
         if (is_single_click)
         {
             m_input_box = item->GetLabel();
@@ -459,125 +549,29 @@ void FileDialog::RenderItem(FileDialogItem* item, const ImVec2& size, bool is_li
         }
         else
         {
-            m_current_path   = item->GetPath();
+            m_current_path = item->GetPath();
             m_history.push_back(m_current_path);
             m_history_index  = m_history.size() - 1;
             m_is_dirty       = true;
             m_selection_made = !item->IsDirectory();
-
             if (m_type == FileDialog_Type_Browser && !item->IsDirectory())
             {
                 FileSystem::OpenUrl(item->GetPath());
             }
-
             if (m_callback_on_item_double_clicked)
             {
                 m_callback_on_item_double_clicked(m_current_path);
             }
         }
     }
-
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_RectOnly))
     {
-        m_is_hovering_item  = true;
+        m_is_hovering_item = true;
         m_hovered_item_path = item->GetPath();
     }
-
     ItemClick(item);
     ItemContextMenu(item);
     ItemDrag(item);
-
-    // drop shadow and hover effect (grid view only)
-    if (!is_list_view)
-    {
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        draw_list->AddRectFilled(
-            ImVec2(button_rect.Min.x - 2.0f, button_rect.Min.y - 2.0f),
-            ImVec2(button_rect.Max.x + 2.0f, button_rect.Max.y + 2.0f),
-            IM_COL32(0, 0, 0, item_background_alpha),
-            5.0f);
-    }
-
-    // hover outline (grid view only)
-    if (ImGui::IsItemHovered() && !is_list_view)
-    {
-        ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        draw_list->AddRect(
-            button_rect.Min,
-            button_rect.Max,
-            IM_COL32(100, 149, 237, 255),
-            5.0f,
-            0,
-            1.0f);
-    }
-
-    // render icon if available
-    if (RHI_Texture* texture = item->GetIcon())
-    {
-        if (texture->GetResourceState() == ResourceState::PreparedForGpu)
-        {
-            ImVec2 image_size(static_cast<float>(texture->GetWidth()), static_cast<float>(texture->GetHeight()));
-            ImVec2 image_size_max;
-            if (is_list_view)
-            {
-                image_size_max = ImVec2(32.0f, 32.0f);
-            }
-            else
-            {
-                const float padding = ImGui::GetStyle().FramePadding.x;
-                image_size_max = ImVec2(button_rect.GetWidth() - padding * 2.0f, button_rect.GetHeight() - padding * 2.0f - ImGui::GetFont()->FontSize - 5.0f);
-            }
-
-            float scale   = min(image_size_max.x / image_size.x, image_size_max.y / image_size.y);
-            image_size.x *= scale;
-            image_size.y *= scale;
-
-            if (is_list_view)
-            {
-                // list view: Inline icon, no cursor manipulation
-                ImGuiSp::image(item->GetIcon(), image_size);
-                ImGui::SameLine();
-            }
-            else
-            {
-                // grid view: center icon
-                ImVec2 image_pos(button_rect.GetCenter().x - image_size.x * 0.5f, button_rect.Min.y + (button_rect.GetHeight() - image_size.y - ImGui::GetFont()->FontSize - 5.0f) * 0.5f);
-                ImGui::SetCursorScreenPos(image_pos);
-                ImGuiSp::image(item->GetIcon(), image_size);
-            }
-        }
-    }
-
-    // render label
-    {
-        ImGuiContext& g     = *GImGui;
-        ImGuiWindow* window = g.CurrentWindow;
-        const char* label   = item->GetLabel().c_str();
-
-        if (is_list_view)
-        {
-            ImGui::SameLine();
-            ImGui::TextUnformatted(item->GetLabel().c_str());
-            ImGui::EndGroup();
-        }
-        else
-        {
-            // grid view: bottom-align label
-            const ImVec2 label_pos(button_rect.Min.x + ImGui::GetStyle().FramePadding.x, button_rect.Max.y - ImGui::GetFont()->FontSize - ImGui::GetStyle().FramePadding.y - 2.0f);
-            ImGui::SetCursorScreenPos(label_pos);
-            ImGui::RenderTextEllipsis(
-                window->DrawList,
-                label_pos,
-                button_rect.Max, // clipping bounds
-                button_rect.Max.x, // min_x for ellipsis
-                button_rect.Max.x, // max_x for ellipsis
-                label,
-                nullptr,
-                nullptr
-            );
-        }
-    }
-
     ImGui::PopStyleColor(2);
     ImGui::PopStyleVar();
     ImGui::PopID();

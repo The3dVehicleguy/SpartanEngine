@@ -48,6 +48,7 @@ namespace spartan
         ParallaxOcclusionMapping,
         ScreenSpaceAmbientOcclusion,
         ScreenSpaceReflections,
+        RayTracedReflections,
         MotionBlur,
         DepthOfField,
         FilmGrain,
@@ -101,23 +102,29 @@ namespace spartan
         gbuffer_velocity = 3,
         gbuffer_depth    = 4,
 
+        // ray-tracing
+        tlas = 5,
+
         // other
-        ssao = 5,
+        ssao = 6,
     
         // misc
-        tex   = 6,
-        tex2  = 7,
-        tex3  = 8,
-        tex4  = 9,
-        tex5  = 10,
-        tex6  = 11,
-        tex3d = 12,
+        tex   = 7,
+        tex2  = 8,
+        tex3  = 9,
+        tex4  = 10,
+        tex5  = 11,
+        tex6  = 12,
+        tex3d = 13,
+
+        // noise
+        tex_perlin = 14,
 
         // bindless
-        bindless_material_textures   = 13,
-        bindless_material_parameters = 14,
-        bindless_light_parameters    = 15,
-        bindless_aabbs               = 16,
+        bindless_material_textures   = 15,
+        bindless_material_parameters = 16,
+        bindless_light_parameters    = 17,
+        bindless_aabbs               = 18,
     };
 
     enum class Renderer_BindingsUav
@@ -186,6 +193,9 @@ namespace spartan
         dithering_c,
         transparency_reflection_refraction_c,
         auto_exposure_c,
+        reflections_ray_generation_r,
+        reflections_ray_miss_r,
+        reflections_ray_hit_r,
         max
     };
     
@@ -252,6 +262,7 @@ namespace spartan
 
     enum class Renderer_StandardTexture
     {
+        Noise_perlin,
         Noise_blue_0,
         Noise_blue_1,
         Noise_blue_2,
@@ -306,13 +317,13 @@ namespace spartan
     class Renderable;
     struct Renderer_DrawCall
     {
-        Renderable* renderable;        // pointer to the renderable object
-        uint32_t instance_group_index; // index of the instance group (used if instanced)
-        uint32_t instance_index;       // starting index in the instance buffer (used if instanced)
-        uint32_t instance_count;       // number of instances to draw (used if instanced)
-        uint32_t lod_index;            // level of detail index for the mesh
-        float distance_squared;        // distance for sorting or other purposes
-        bool is_occluder;              // is this draw call an occluder
-        bool camera_visible;           // is this draw call visible to the camera
+        Renderable* renderable  = nullptr;
+        uint32_t instance_index = 0;
+        uint32_t instance_count = 0;
+        uint32_t lod_index      = 0;
+        float distance_squared  = 0.0f;
+        bool is_occluder        = false;
+        bool camera_visible     = false;
     };
+
 }

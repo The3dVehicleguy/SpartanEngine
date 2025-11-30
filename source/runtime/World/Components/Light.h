@@ -74,7 +74,7 @@ namespace spartan
 
         //= COMPONENT ================================
         void PreTick() override;
-        void OnTick() override;
+        void Tick() override;
         void Save(pugi::xml_node& node) override;
         void Load(pugi::xml_node& node) override;
         //============================================
@@ -101,8 +101,8 @@ namespace spartan
         float GetIntensityWatt() const;
 
         // bias
-        static float GetBias()            { return -0.0005f; }
-        static float GetBiasSlopeScaled() { return -1.0f; }
+        static float GetBias()            { return -0.0007f; }
+        static float GetBiasSlopeScaled() { return -1.2f; }
 
         // range
         void SetRange(float range);
@@ -116,7 +116,7 @@ namespace spartan
         const math::Matrix GetViewProjectionMatrix(uint32_t index) const { return m_matrix_view[index] * m_matrix_projection[index]; }
 
         // frustum
-        bool IsInViewFrustum(Renderable* renderable, const uint32_t array_index, const uint32_t instance_group_index = 0) const;
+        bool IsInViewFrustum(Renderable* renderable, const uint32_t array_index) const;
 
         // index
         void SetIndex(const uint32_t index) { m_index = index; }
@@ -125,6 +125,10 @@ namespace spartan
         // screen space shadows slice index
         void SetScreenSpaceShadowsSliceIndex(const uint32_t index) { m_index = index; }
         uint32_t GetScreenSpaceShadowsSliceIndex() const           { return m_index; }
+
+        // draw distance
+        void SetDrawDistance(const float distance) { m_draw_distance = distance; }
+        float GetDrawDistance() const              { return m_draw_distance; }
 
         // misc
         bool NeedsSkysphereUpdate() const;
@@ -160,6 +164,7 @@ namespace spartan
         math::Vector3 m_far_cascade_max  = math::Vector3::Zero;
         bool m_is_active_previous_frame  = false;
         bool m_changed_this_frame        = false;
+        float m_draw_distance            = 512.0f; // max distance at which light will affect objects (meters)
 
         // matrices/frustums per slice/face/cascade
         std::array<math::Frustum, 6> m_frustums;

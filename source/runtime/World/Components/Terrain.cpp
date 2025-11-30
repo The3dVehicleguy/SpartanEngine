@@ -1,4 +1,4 @@
-﻿/*
+/*
 Copyright(c) 2015-2025 Panos Karabelas
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -51,7 +51,7 @@ namespace spartan
         const bool create_border = true;   // adds a natural border to block player exit
     }
 
-    namespace
+    namespace placement
     {
         struct TriangleData
         {
@@ -63,120 +63,240 @@ namespace spartan
             float height_min;
             float height_max;
             Quaternion rotation_to_normal;
+            Vector3 centroid;
         };
-        static vector<TriangleData> triangle_data;
+        static unordered_map<uint64_t, vector<TriangleData>> triangle_data;
 
-        void compute_triangle_data(const vector<RHI_Vertex_PosTexNorTan>& terrain_vertices, const vector<uint32_t>& terrain_indices)
+        struct ClusterData
         {
-            uint32_t triangle_count = static_cast<uint32_t>(terrain_indices.size() / 3);
-            triangle_data.resize(triangle_count);
-        
-            auto compute_triangle = [&terrain_vertices, &terrain_indices](uint32_t start_index, uint32_t end_index)
+            Vector3 center_position;
+            uint32_t center_tri_idx;
+        };
+
+        void compute_triangle_data(
+            const vector<vector<RHI_Vertex_PosTexNorTan>>& vertices_terrain,
+            const vector<vector<uint32_t>>& indices_terrain,
+            uint32_t tile_index
+        )
+        {
+            const vector<RHI_Vertex_PosTexNorTan>& vertices_tile = vertices_terrain[tile_index];
+            const vector<uint32_t>& indices_tile                 = indices_terrain[tile_index];
+
+            uint32_t triangle_count  = static_cast<uint32_t>(indices_tile.size() / 3);
+            auto& tile_triangle_data = triangle_data[tile_index];
+            tile_triangle_data.resize(triangle_count);
+
+            auto compute_triangle = [&vertices_tile, &indices_tile, &tile_triangle_data](uint32_t start_index, uint32_t end_index)
             {
                 for (uint32_t i = start_index; i < end_index; i++)
                 {
-                    uint32_t idx0 = terrain_indices[i * 3];
-                    uint32_t idx1 = terrain_indices[i * 3 + 1];
-                    uint32_t idx2 = terrain_indices[i * 3 + 2];
-        
-                    Vector3 v0(terrain_vertices[idx0].pos[0], terrain_vertices[idx0].pos[1], terrain_vertices[idx0].pos[2]);
-                    Vector3 v1(terrain_vertices[idx1].pos[0], terrain_vertices[idx1].pos[1], terrain_vertices[idx1].pos[2]);
-                    Vector3 v2(terrain_vertices[idx2].pos[0], terrain_vertices[idx2].pos[1], terrain_vertices[idx2].pos[2]);
-        
+                    uint32_t idx0 = indices_tile[i * 3];
+                    uint32_t idx1 = indices_tile[i * 3 + 1];
+                    uint32_t idx2 = indices_tile[i * 3 + 2];
+
+                    // apply tile offset so vertices are in world space
+                    Vector3 v0(vertices_tile[idx0].pos[0], vertices_tile[idx0].pos[1], vertices_tile[idx0].pos[2]);
+                    Vector3 v1(vertices_tile[idx1].pos[0], vertices_tile[idx1].pos[1], vertices_tile[idx1].pos[2]);
+                    Vector3 v2(vertices_tile[idx2].pos[0], vertices_tile[idx2].pos[1], vertices_tile[idx2].pos[2]);
+
                     Vector3 normal                = Vector3::Cross(v1 - v0, v2 - v0).Normalized();
                     float slope_radians           = acos(Vector3::Dot(normal, Vector3::Up));
-                    float height_min              = min({v0.y, v1.y, v2.y});
-                    float height_max              = max({v0.y, v1.y, v2.y});
+                    float height_min              = min({ v0.y, v1.y, v2.y });
+                    float height_max              = max({ v0.y, v1.y, v2.y });
                     Vector3 v1_minus_v0           = v1 - v0;
                     Vector3 v2_minus_v0           = v2 - v0;
-                    Quaternion rotation_to_normal = Quaternion::FromToRotation(Vector3::Up, normal);
-        
-                    triangle_data[i] = { normal, v0, v1_minus_v0, v2_minus_v0, slope_radians, height_min, height_max, rotation_to_normal };
+                    Quaternion rotation_to_normal = Quaternion::FromRotation(Vector3::Up, normal);
+
+                    Vector3 centroid = v0 + (v1_minus_v0 + v2_minus_v0) / 3.0f;
+
+                    tile_triangle_data[i] = { normal, v0, v1_minus_v0, v2_minus_v0, slope_radians, height_min, height_max, rotation_to_normal, centroid };
                 }
             };
-        
+
             ThreadPool::ParallelLoop(compute_triangle, triangle_count);
         }
 
-        vector<Matrix> find_transforms(
-            const uint32_t transform_count,
-            const float max_slope_radians,             // the maximum slope in radians that is acceptable for placing the mesh
-            const bool rotate_to_match_surface_normal, // if true, the mesh will be rotated to match the surface normal of the terrain
-            const float terrain_offset,                // the offset to apply to the terrain height, useful for placing meshes a bit below the terrain surface
-            const float height_min,                    // the minimum height of the terrain to place the mesh
-            const float height_max,                    // the maximum height of the terrain to place the mesh
-            const float scale_min,                     // the minimum scale of the mesh
-            const float scale_max,                     // the maximum scale of the mesh
-            const bool scale_by_slope,                 // in real life, larger rocks tend to settle on flatter terrain, while steeper slopes hold smaller debris or fragments
-            const float height_jitter                  // the amount of height jitter to apply to the mesh placement, useful for adding some organic variation instead of getting perfect lines
+        void find_transforms(
+            TerrainPropDescription prop_desc,
+            const float density_fraction,
+            uint32_t tile_index,
+            vector<Matrix>& transforms_out
         )
         {
-            SP_ASSERT(!triangle_data.empty());
-        
+            auto it = triangle_data.find(tile_index);
+            if (it == triangle_data.end())
+            {
+                SP_LOG_ERROR("No triangle data found for tile %d", tile_index);
+                return;
+            }
+            vector<TriangleData>& tile_triangle_data = it->second;
+            SP_ASSERT(!tile_triangle_data.empty());
+
             // step 1: filter acceptable triangles using precomputed data
             vector<uint32_t> acceptable_triangles;
-            acceptable_triangles.reserve(triangle_data.size());
+            acceptable_triangles.reserve(tile_triangle_data.size());
             {
-                mt19937 generator(random_device{}());
-                uniform_real_distribution<float> jitter_dist(0.0f, height_jitter);
-                float jitter_amount = jitter_dist(generator);
-
-                for (uint32_t i = 0; i < triangle_data.size(); i++)
+                for (uint32_t i = 0; i < tile_triangle_data.size(); i++)
                 {
-                    if (triangle_data[i].slope_radians <= max_slope_radians &&
-                        triangle_data[i].height_min >= height_min - jitter_amount &&
-                        triangle_data[i].height_max <= height_max + jitter_amount)
+                    if (tile_triangle_data[i].slope_radians <= prop_desc.max_slope_angle_rad &&
+                        tile_triangle_data[i].height_min >= prop_desc.min_spawn_height &&
+                        tile_triangle_data[i].height_max <= prop_desc.max_spawn_height)
                     {
                         acceptable_triangles.push_back(i);
-                        jitter_amount = jitter_dist(generator);
                     }
                 }
-        
                 if (acceptable_triangles.empty())
-                {
-                    SP_LOG_WARNING("No acceptable triangles found for the given criteria");
-                    return {};
-                }
+                    return;
             }
-        
-            // step 2: pre-allocate output vector
-            vector<Matrix> transforms(transform_count);
-        
-            // step 3: parallel placement without mutex by direct assignment
-            auto place_mesh = [&](uint32_t start_index, uint32_t end_index)
+
+            // step 2: compute adjusted count based on density fraction of acceptable triangles (maintains uniform visual density)
+            uint32_t adjusted_count = static_cast<uint32_t>(density_fraction * static_cast<float>(acceptable_triangles.size()) + 0.5f);
+
+            // step 3: pre-allocate output vector
+            transforms_out.resize(adjusted_count);
+            if (adjusted_count == 0)
+                return;
+
+            // setup clusters
+            uint32_t cluster_count              = adjusted_count;
+            uint32_t base_instances_per_cluster = 1;
+            uint32_t remainder_instances        = 0;
+            if (prop_desc.instances_per_cluster > 1)
+            {
+                cluster_count = max(1u, adjusted_count / prop_desc.instances_per_cluster);
+                base_instances_per_cluster = adjusted_count / cluster_count;
+                remainder_instances = adjusted_count % cluster_count;
+            }
+            vector<ClusterData> clusters(cluster_count);
+
+            auto place_cluster = [
+                &clusters,
+                &tile_triangle_data,
+                &acceptable_triangles,
+                &prop_desc
+            ]
+            (uint32_t start_index, uint32_t end_index)
             {
                 mt19937 generator(random_device{}());
                 const uint32_t tri_count = static_cast<uint32_t>(acceptable_triangles.size());
                 uniform_int_distribution<> triangle_dist(0, tri_count - 1);
                 uniform_real_distribution<float> dist(0.0f, 1.0f);
-                uniform_real_distribution<float> angle_dist(0.0f, 360.0f);
-                uniform_real_distribution<float> scale_dist(scale_min, scale_max);
-        
                 for (uint32_t i = start_index; i < end_index; i++)
                 {
-                    uint32_t tri_idx        = acceptable_triangles[triangle_dist(generator)];
-                    const TriangleData& tri = triangle_data[tri_idx];
+                    uint32_t tri_idx  = acceptable_triangles[triangle_dist(generator)];
+                    TriangleData& tri = tile_triangle_data[tri_idx];
+
+                    // position (xz used as cluster center)
+                    float r1         = dist(generator);
+                    float r2         = dist(generator);
+                    float sqrt_r1    = sqrtf(r1);
+                    float u          = 1.0f - sqrt_r1;
+                    float v          = r2 * sqrt_r1;
+                    Vector3 position = tri.v0 + u * tri.v1_minus_v0 + v * tri.v2_minus_v0 + Vector3(0.0f, prop_desc.surface_offset, 0.0f);
+                    clusters[i]      = { position, tri_idx };
+                }
+            };
+            ThreadPool::ParallelLoop(place_cluster, cluster_count);
+
+            // compute nearby acceptable triangles per cluster (for snapping to surface)
+            vector<vector<uint32_t>> cluster_nearby_tris(cluster_count);
+            auto compute_nearby = [
+                &cluster_nearby_tris,
+                &clusters,
+                &tile_triangle_data,
+                &acceptable_triangles,
+                &prop_desc
+            ]
+            (uint32_t start_index, uint32_t end_index)
+            {
+                mt19937 generator(random_device{}());
+                const uint32_t tri_count = static_cast<uint32_t>(acceptable_triangles.size());
+                uniform_int_distribution<> triangle_dist(0, tri_count - 1);
+                for (uint32_t c = start_index; c < end_index; c++)
+                {
+                    auto& nearby = cluster_nearby_tris[c];
+                    ClusterData& cl = clusters[c];
+                    Vector2 cl_xz(cl.center_position.x, cl.center_position.z);
+                    if (prop_desc.cluster_radius <= 0.0f)
+                    {
+                        nearby.push_back(cl.center_tri_idx);
+                    }
+                    else
+                    {
+                        for (uint32_t t = 0; t < tri_count; t++)
+                        {
+                            uint32_t tri_idx = acceptable_triangles[t];
+                            TriangleData& tri = tile_triangle_data[tri_idx];
+                            Vector2 tri_xz(tri.centroid.x, tri.centroid.z);
+                            float dist_sq = (tri_xz - cl_xz).LengthSquared();
+                            if (dist_sq <= prop_desc.cluster_radius * prop_desc.cluster_radius)
+                            {
+                                nearby.push_back(tri_idx);
+                            }
+                        }
+                        if (nearby.empty())
+                        {
+                            nearby.push_back(cl.center_tri_idx);
+                        }
+                    }
+                }
+            };
+            ThreadPool::ParallelLoop(compute_nearby, cluster_count);
+
+            // step 4: parallel placement without mutex by direct assignment
+            auto place_mesh = [
+                &transforms_out,
+                &tile_triangle_data,
+                &prop_desc,
+                &cluster_nearby_tris,
+                base_instances_per_cluster,
+                remainder_instances
+            ]
+            (uint32_t start_index, uint32_t end_index)
+            {
+                mt19937 generator(random_device{}());
+                uniform_real_distribution<float> dist(0.0f, 1.0f);
+                uniform_real_distribution<float> angle_dist(0.0f, 360.0f);
+                uniform_real_distribution<float> scale_dist(prop_desc.min_scale, prop_desc.max_scale);
+                uint32_t larger_cluster_size = base_instances_per_cluster + 1;
+                for (uint32_t i = start_index; i < end_index; i++)
+                {
+                    // compute cluster idx from instance idx (distributes remainder to first clusters)
+                    uint32_t cluster_idx;
+                    if (i < remainder_instances * larger_cluster_size)
+                    {
+                        cluster_idx = i / larger_cluster_size;
+                    }
+                    else
+                    {
+                        cluster_idx = remainder_instances + (i - remainder_instances * larger_cluster_size) / base_instances_per_cluster;
+                    }
+                    auto& nearby = cluster_nearby_tris[cluster_idx];
+                    if (nearby.empty())
+                        continue;
+
+                    uniform_int_distribution<int> nearby_dist(0, static_cast<int>(nearby.size()) - 1);
+                    uint32_t tri_idx  = nearby[nearby_dist(generator)];
+                    TriangleData& tri = tile_triangle_data[tri_idx];
 
                     // position
                     Vector3 position = Vector3::Zero;
                     {
-                        // compute barycentric coordinates
                         float r1      = dist(generator);
                         float r2      = dist(generator);
                         float sqrt_r1 = sqrtf(r1);
                         float u       = 1.0f - sqrt_r1;
                         float v       = r2 * sqrt_r1;
-                        position      = tri.v0 + u * tri.v1_minus_v0 + v * tri.v2_minus_v0 + Vector3(0.0f, terrain_offset, 0.0f);
+                        position      = tri.v0 + u * tri.v1_minus_v0 + v * tri.v2_minus_v0 + Vector3(0.0f, prop_desc.surface_offset, 0.0f);
                     }
 
                     // rotation
                     Quaternion rotation;
                     {
-                        if (rotate_to_match_surface_normal)
+                        if (prop_desc.align_to_surface_normal)
                         {
-                            Quaternion rotate_to_normal  = tri.rotation_to_normal;
                             Quaternion random_y_rotation = Quaternion::FromEulerAngles(0.0f, angle_dist(generator), 0.0f);
-                            rotation                     = rotate_to_normal * random_y_rotation;
+                            rotation                     = tri.rotation_to_normal * random_y_rotation;
                         }
                         else
                         {
@@ -186,22 +306,22 @@ namespace spartan
 
                     // scale
                     float scale = scale_dist(generator);
-                    if (scale_by_slope)
+                    if (prop_desc.scale_adjust_by_slope)
                     {
-                        float slope_normalized = tri.slope_radians / max_slope_radians;
+                        float slope_normalized = tri.slope_radians / prop_desc.max_slope_angle_rad;
                         slope_normalized       = clamp(slope_normalized, 0.0f, 1.0f);
-                        scale                  = lerp(scale_max, scale_min, slope_normalized);
+                        float slope_scale      = lerp(1.0f, prop_desc.max_scale / prop_desc.min_scale, slope_normalized);
+                        scale                  *= slope_scale;
                     }
-        
-                    transforms[i] = Matrix::CreateScale(scale) * Matrix::CreateRotation(rotation) * Matrix::CreateTranslation(position);
+                    transforms_out[i] = Matrix::CreateScale(scale) * Matrix::CreateRotation(rotation) * Matrix::CreateTranslation(position);
                 }
             };
-        
-            ThreadPool::ParallelLoop(place_mesh, transform_count);
-        
-            return transforms;
+            ThreadPool::ParallelLoop(place_mesh, adjusted_count);
         }
+    }
 
+    namespace
+    {
         float compute_surface_area_km2(const vector<RHI_Vertex_PosTexNorTan>& vertices, const vector<uint32_t>& indices)
         {
             float area_m2 = 0.0f;
@@ -313,7 +433,7 @@ namespace spartan
                 const uint32_t border_backface_width = 2;      // width of the thin outer edge to push down for backface creation (prevents see-through from outside)
                 const uint32_t border_plateau_width  = 25;     // width of the flat plateau at max height inward from the backface
                 const uint32_t border_blend_width    = 20;     // width over which to blend down from max height further inward (slope of the inner wall)
-                const float border_height_max        = 280.0f; // maximum height to raise borders (e.g., 1.5x original max for prominent mountains)
+                const float border_height_max        = 150.0f; // maximum height to raise borders
 
                 // create the borders
                 auto apply_border = [&height_data_out, width, height, border_backface_width, border_plateau_width, border_blend_width, border_height_max, min_y](uint32_t start_index, uint32_t end_index)
@@ -361,11 +481,11 @@ namespace spartan
                 return; // no density increase needed
         
             // compute dense grid dimensions
-            uint32_t dense_width  = density * (width - 1) + 1;
-            uint32_t dense_height = density * (height - 1) + 1;
+            uint32_t m_dense_width  = density * (width - 1) + 1;
+            uint32_t m_dense_height = density * (height - 1) + 1;
         
             // create new height map with denser grid
-            vector<float> dense_height_data(dense_width * dense_height);
+            vector<float> dense_height_data(m_dense_width * m_dense_height);
         
             // helper function to get height at integer coordinates
             auto get_height = [&height_data, width, height](uint32_t x, uint32_t y) -> float
@@ -376,12 +496,12 @@ namespace spartan
             };
         
             // parallel computation of dense grid
-            auto compute_dense_pixel = [&dense_height_data, &get_height, width, height, dense_width, dense_height, density](uint32_t start_index, uint32_t end_index)
+            auto compute_dense_pixel = [&dense_height_data, &get_height, width, height, m_dense_width, m_dense_height, density](uint32_t start_index, uint32_t end_index)
             {
                 for (uint32_t index = start_index; index < end_index; index++)
                 {
-                    uint32_t x = index % dense_width;
-                    uint32_t y = index / dense_width;
+                    uint32_t x = index % m_dense_width;
+                    uint32_t y = index / m_dense_width;
         
                     // map to original height map coordinates (0 to width-1, 0 to height-1)
                     float u = static_cast<float>(x) / static_cast<float>(density);
@@ -407,22 +527,22 @@ namespace spartan
                                    (1.0f - dx) * dy * h01 +
                                    dx * dy * h11;
         
-                    dense_height_data[y * dense_width + x] = height;
+                    dense_height_data[y * m_dense_width + x] = height;
                 }
             };
         
-            ThreadPool::ParallelLoop(compute_dense_pixel, dense_width * dense_height);
+            ThreadPool::ParallelLoop(compute_dense_pixel, m_dense_width * m_dense_height);
         
             // replace original height data with denser grid
             height_data = move(dense_height_data);
         }
 
-        void generate_positions(vector<Vector3>& positions, const vector<float>& height_map, const uint32_t width, const uint32_t height)
+        void generate_positions(vector<Vector3>& m_positions, const vector<float>& height_map, const uint32_t width, const uint32_t height)
         {
             SP_ASSERT_MSG(!height_map.empty(), "Height map is empty");
         
             // pre-allocate positions vector
-            positions.resize(width * height);
+            m_positions.resize(width * height);
         
             // compute base dimensions (before density)
             uint32_t base_width  = (width - 1) / parameters::density + 1;
@@ -439,7 +559,7 @@ namespace spartan
             float offset_z = extent_z / 2.0f;
         
             // parallel generation of positions
-            auto generate_position_range = [&positions, &height_map, width, height, scale_x, scale_z, offset_x, offset_z](uint32_t start_index, uint32_t end_index)
+            auto generate_position_range = [&m_positions, &height_map, width, height, scale_x, scale_z, offset_x, offset_z](uint32_t start_index, uint32_t end_index)
             {
                 for (uint32_t index = start_index; index < end_index; index++)
                 {
@@ -457,7 +577,7 @@ namespace spartan
                     // get height from height_map
                     float height_value = height_map[index];
         
-                    positions[index] = Vector3(centered_x, height_value, centered_z);
+                    m_positions[index] = Vector3(centered_x, height_value, centered_z);
                 }
             };
         
@@ -465,7 +585,7 @@ namespace spartan
             ThreadPool::ParallelLoop(generate_position_range, total_positions);
         }
 
-        void apply_wind_erosion(vector<Vector3>& positions, uint32_t width, uint32_t height, float wind_strength = 0.3f)
+        void apply_wind_erosion(vector<Vector3>& m_positions, uint32_t width, uint32_t height, float wind_strength = 0.3f)
         {
             // 3x3 gaussian kernel
             const float kernel[3][3] =
@@ -478,7 +598,7 @@ namespace spartan
             const int kernel_half = kernel_size / 2;
         
             // store original positions for reference
-           vector<Vector3> temp_positions = positions;
+           vector<Vector3> temp_positions = m_positions;
            mutex positions_mutex;
         
             // sequential wind erosion
@@ -503,20 +623,20 @@ namespace spartan
         
                     // update height with wind strength (interpolate between original and convolved height)
                     uint32_t idx = x + z * width;
-                    float original_height = positions[idx].y;
+                    float original_height = m_positions[idx].y;
                     float smoothed_height = new_height;
                     float final_height = original_height + wind_strength * (smoothed_height - original_height);
         
                     // update
                     {
                         lock_guard<mutex> lock(positions_mutex);
-                        positions[idx].y = final_height;
+                        m_positions[idx].y = final_height;
                     }
                 }
             }
         }
         
-        void apply_erosion(vector<Vector3>& positions, uint32_t width, uint32_t height, uint32_t iterations = 1'000'000, uint32_t wind_interval = 50'000)
+        void apply_erosion(vector<Vector3>& m_positions, uint32_t width, uint32_t height, uint32_t iterations = 1'000'000, uint32_t wind_interval = 50'000)
         {
             // erosion parameters
             const float inertia          = 0.05f;
@@ -529,7 +649,7 @@ namespace spartan
             const uint32_t max_steps     = 30;
             const float wind_strength    = 0.3f;
 
-            auto get_height = [&positions, width, height](float x, float z) -> float
+            auto get_height = [&m_positions, width, height](float x, float z) -> float
             {
                 int ix   = static_cast<int>(floor(x));
                 int iz   = static_cast<int>(floor(z));
@@ -538,10 +658,10 @@ namespace spartan
                 ix       = clamp(ix, 0, static_cast<int>(width) - 2);
                 iz       = clamp(iz, 0, static_cast<int>(height) - 2);
         
-                float h00 = positions[static_cast<size_t>(iz) * width + ix].y;
-                float h10 = positions[static_cast<size_t>(iz) * width + ix + 1].y;
-                float h01 = positions[static_cast<size_t>(iz + 1) * width + ix].y;
-                float h11 = positions[static_cast<size_t>(iz + 1) * width + ix + 1].y;
+                float h00 = m_positions[static_cast<size_t>(iz) * width + ix].y;
+                float h10 = m_positions[static_cast<size_t>(iz) * width + ix + 1].y;
+                float h01 = m_positions[static_cast<size_t>(iz + 1) * width + ix].y;
+                float h11 = m_positions[static_cast<size_t>(iz + 1) * width + ix + 1].y;
         
                 float h0 = h00 + fx * (h10 - h00);
                 float h1 = h01 + fx * (h11 - h01);
@@ -549,7 +669,7 @@ namespace spartan
                 return h0 + fz * (h1 - h0);
             };
         
-            auto add_height = [&positions, width, height](float x, float z, float amount)
+            auto add_height = [&m_positions, width, height](float x, float z, float amount)
             {
                 int ix   = static_cast<int>(floor(x));
                 int iz   = static_cast<int>(floor(z));
@@ -568,7 +688,7 @@ namespace spartan
                 float max_step = 0.5f;
                 auto apply     = [&](size_t idx, float delta)
                 {
-                    float& h  = positions[idx].y;
+                    float& h  = m_positions[idx].y;
                     h        += clamp(delta, -max_step, max_step);
                     h         = max(h, parameters::level_sea - 10.0f);
                 };
@@ -597,7 +717,7 @@ namespace spartan
                 // apply wind erosion periodically
                 if (i % wind_interval == 0 && i != 0)
                 {
-                    apply_wind_erosion(positions, width, height, wind_strength);
+                    apply_wind_erosion(m_positions, width, height, wind_strength);
                 }
         
                 // hydraulic erosion: simulate a single droplet
@@ -672,12 +792,12 @@ namespace spartan
             }
         
             // final wind erosion pass
-            apply_wind_erosion(positions, width, height, wind_strength);
+            apply_wind_erosion(m_positions, width, height, wind_strength);
         }
 
-        void generate_vertices_and_indices(vector<RHI_Vertex_PosTexNorTan>& terrain_vertices, vector<uint32_t>& terrain_indices, const vector<Vector3>& positions, const uint32_t width, const uint32_t height)
+        void generate_vertices_and_indices(vector<RHI_Vertex_PosTexNorTan>& terrain_vertices, vector<uint32_t>& terrain_indices, const vector<Vector3>& m_positions, const uint32_t width, const uint32_t height)
         {
-            SP_ASSERT_MSG(!positions.empty(), "Positions are empty");
+            SP_ASSERT_MSG(!m_positions.empty(), "Positions are empty");
 
             // offset that centers the mesh
             Vector3 offset = Vector3( -static_cast<float>(width) * 0.5f, 0.0f, -static_cast<float>(height) * 0.5f);
@@ -688,7 +808,7 @@ namespace spartan
             {
                 for (uint32_t x = 0; x < width - 1; x++)
                 {
-                    Vector3 position = positions[index] + offset;
+                    Vector3 position = m_positions[index] + offset;
 
                     float u = static_cast<float>(x) / static_cast<float>(width - 1);
                     float v = static_cast<float>(y) / static_cast<float>(height - 1);
@@ -701,32 +821,32 @@ namespace spartan
                     // bottom right of quad
                     index           = index_bottom_right;
                     terrain_indices[k]      = index;
-                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(positions[index], Vector2(u + 1.0f / (width - 1), v + 1.0f / (height - 1)));
+                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(m_positions[index], Vector2(u + 1.0f / (width - 1), v + 1.0f / (height - 1)));
 
                     // bottom left of quad
                     index           = index_bottom_left;
                     terrain_indices[k + 1]  = index;
-                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(positions[index], Vector2(u, v + 1.0f / (height - 1)));
+                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(m_positions[index], Vector2(u, v + 1.0f / (height - 1)));
 
                     // top left of quad
                     index           = index_top_left;
                     terrain_indices[k + 2]  = index;
-                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(positions[index], Vector2(u, v));
+                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(m_positions[index], Vector2(u, v));
 
                     // bottom right of quad
                     index           = index_bottom_right;
                     terrain_indices[k + 3]  = index;
-                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(positions[index], Vector2(u + 1.0f / (width - 1), v + 1.0f / (height - 1)));
+                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(m_positions[index], Vector2(u + 1.0f / (width - 1), v + 1.0f / (height - 1)));
 
                     // top left of quad
                     index           = index_top_left;
                     terrain_indices[k + 4]  = index;
-                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(positions[index], Vector2(u, v));
+                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(m_positions[index], Vector2(u, v));
 
                     // top right of quad
                     index           = index_top_right;
                     terrain_indices[k + 5]  = index;
-                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(positions[index], Vector2(u + 1.0f / (width - 1), v));
+                    terrain_vertices[index] = RHI_Vertex_PosTexNorTan(m_positions[index], Vector2(u + 1.0f / (width - 1), v));
 
                     k += 6; // next quad
                 }
@@ -803,7 +923,7 @@ namespace spartan
             ThreadPool::ParallelLoop(compute_vertex_data, static_cast<uint32_t>(terrain_vertices.size()));
         }
 
-        void apply_perlin_noise(vector<Vector3>& positions, uint32_t width, uint32_t height, float amplitude = 5.0f, float frequency = 0.01f, uint32_t octaves = 4, float persistence = 1.0f)
+        void apply_perlin_noise(vector<Vector3>& m_positions, uint32_t width, uint32_t height, float amplitude = 5.0f, float frequency = 0.01f, uint32_t octaves = 4, float persistence = 1.0f)
         {
             auto fade = [](float t) -> float
             {
@@ -897,7 +1017,7 @@ namespace spartan
                     }
         
                     noise_value /= max_amplitude; // normalize to [-1,1] range
-                    positions[index].y += noise_value * amplitude; // apply final amplitude
+                    m_positions[index].y += noise_value * amplitude; // apply final amplitude
                 }
             };
         
@@ -913,58 +1033,75 @@ namespace spartan
 
     Terrain::~Terrain()
     {
-        m_height_texture = nullptr;
+        m_height_map_seed = nullptr;
     }
 
-    void Terrain::GenerateTransforms(vector<Matrix>* transforms, const uint32_t count, const TerrainProp terrain_prop, float offset_y)
+    void Terrain::FindTransforms(const uint32_t tile_index, const TerrainProp terrain_prop, Entity* entity, const float density_fraction, const float scale, vector<Matrix>& transforms_out)
     {
-        bool rotate_match_surface_normal = false;                        // don't rotate to match the surface normal
-        float max_slope                  = 0.0f;                         // don't allow slope
-        float terrain_offset             = offset_y;                     // 0.0f places exactly on the terrain
-        float height_min                 = parameters::level_sea;        // start spawning at sea level
-        float height_max                 = numeric_limits<float>::max(); // no height limit
-        float scale_min                  = 0.0f;
-        float scale_max                  = 1.0f;
-        bool scale_by_slope              = false;                        // relevant for rocks (in real life, larger rocks tend to settle on flatter terrain)
-        float height_variation           = 0.0f;
-    
+        TerrainPropDescription description;
+
         if (terrain_prop == TerrainProp::Tree)
         {
-            max_slope  = 30.0f * math::deg_to_rad;     // tighter slope for trees in harsh
-            height_min = parameters::level_sea + 5.0f; // a bit above sea level
-            height_max = parameters::level_snow + 20;  // stop a bit above the snow
-            scale_min  = 0.8f;
-            scale_max  = 1.5f;
+            description.max_slope_angle_rad  = 45.0f * math::deg_to_rad;     // moderate slope
+            description.min_spawn_height     = parameters::level_sea + 5.0f; // a bit above sea level
+            description.max_spawn_height     = parameters::level_snow + 20;  // stop a bit above the snow
+            description.min_scale            = scale * 0.4f;
+            description.max_scale            = scale * 1.0f;
         }
         else if (terrain_prop == TerrainProp::Grass)
         {
-            max_slope                   = 45.0f * math::deg_to_rad;     // moderate slope for grass in snowy, high-altitude conditions
-            rotate_match_surface_normal = true;                         // small plants align with terrain normal
-            height_min                  = parameters::level_sea + 5.0f; // a bit above sea level
-            height_max                  = parameters::level_snow;       // stop when snow shows up
-            scale_min                   = 1.0f;
-            scale_max                   = 1.5f;
-            height_variation            = 5.0f;                         // ensure grass doesn't hit a min or max limit and form a perfect line
+            description.max_slope_angle_rad     = 45.0f * math::deg_to_rad;     // moderate slope for grass in snowy, high-altitude conditions
+            description.align_to_surface_normal = true;                         // small plants align with terrain normal
+            description.min_spawn_height        = parameters::level_sea + 5.0f; // a bit above sea level
+            description.max_spawn_height        = parameters::level_snow;       // stop when snow shows up
+            description.min_scale               = scale * 1.0f;
+            description.max_scale               = scale * 1.5f;
+        }
+        else if (terrain_prop == TerrainProp::Flower)
+        {
+            description.max_slope_angle_rad     = 45.0f * math::deg_to_rad;     // moderate slope for grass in snowy, high-altitude conditions
+            description.align_to_surface_normal = true;                         // small plants align with terrain normal
+            description.min_spawn_height        = parameters::level_sea + 5.0f; // a bit above sea level
+            description.max_spawn_height        = parameters::level_snow;       // stop when snow shows up
+            description.min_scale               = scale * 0.2f;
+            description.max_scale               = scale * 1.2f;
+            description.instances_per_cluster   = 1000;                         // avg flowers per cluster
+            description.cluster_radius          = 30.0f;                        // max spread radius in world units
         }
         else if (terrain_prop == TerrainProp::Rock)
         {
-            max_slope                   = 60.0f * math::deg_to_rad;      // moderate slope for grass in snowy, high-altitude conditions
-            rotate_match_surface_normal = true;                          // small plants align with terrain normal
-            height_min                  = parameters::level_sea - 10.0f; // can spawn underwater
-            height_max                  = numeric_limits<float>::max();  // can spawn at any height
-            scale_min                   = 0.1f;
-            scale_max                   = 1.5f;
-            scale_by_slope              = true;
+            description.max_slope_angle_rad     = 45.0f * math::deg_to_rad;      // steeper slope for rocks
+            description.align_to_surface_normal = true;                          // rocks align with terrain normal
+            description.min_spawn_height        = parameters::level_sea - 10.0f; // can spawn underwater
+            description.max_spawn_height        = numeric_limits<float>::max();  // can spawn at any height
+            description.min_scale               = scale * 0.1f;
+            description.max_scale               = scale * 1.0f;
+            description.scale_adjust_by_slope   = true;
         }
         else
         {
-            SP_ASSERT_MSG(false, "Unknown terrain prop type for GenerateTransforms");
+            SP_ASSERT_MSG(false, "Unknown terrain prop type for FindTransforms");
         }
-    
-        *transforms = find_transforms(count, max_slope, rotate_match_surface_normal, terrain_offset, height_min, height_max, scale_min, scale_max, scale_by_slope, height_variation);
+
+        placement::find_transforms(
+            description,
+            density_fraction,
+            tile_index,
+            transforms_out
+        );
+
+        // counter-act any scaling since it's baked into the instance transforms and can be controled via scale_min and scale_max
+        if (entity->GetScale() != Vector3::One && entity->GetScale() != Vector3::Zero)
+        {
+            Matrix root_scale_matrix = Matrix::CreateScale(Vector3::One / entity->GetScale());
+            for (Matrix& t : transforms_out)
+            {
+                t *= root_scale_matrix;
+            }
+        }
     }
 
-    void Terrain::SaveToFile(const char* file_path)
+     void Terrain::SaveToFile(const char* file_path)
     {
         ofstream file(file_path, ios::binary);
         if (!file.is_open())
@@ -973,34 +1110,52 @@ namespace spartan
             return;
         }
     
-        uint32_t width            = GetWidth();
-        uint32_t height           = GetHeight();
-        uint32_t height_data_size = static_cast<uint32_t>(m_height_data.size());
-        uint32_t vertex_count     = static_cast<uint32_t>(m_vertices.size());
-        uint32_t index_count      = static_cast<uint32_t>(m_indices.size());
-        uint32_t tile_count       = static_cast<uint32_t>(m_tile_vertices.size());
-        uint32_t placement_count  = static_cast<uint32_t>(triangle_data.size());
-        uint32_t offset_count     = static_cast<uint32_t>(m_tile_offsets.size());
+        uint32_t width               = GetWidth();
+        uint32_t height              = GetHeight();
+        uint32_t height_data_size    = static_cast<uint32_t>(m_height_data.size());
+        uint32_t vertex_count        = static_cast<uint32_t>(m_vertices.size());
+        uint32_t index_count         = static_cast<uint32_t>(m_indices.size());
+        uint32_t tile_count          = static_cast<uint32_t>(m_tile_vertices.size());
+        uint32_t triangle_data_count = static_cast<uint32_t>(placement::triangle_data.size());
+        uint32_t offset_count        = static_cast<uint32_t>(m_tile_offsets.size());
+        uint32_t position_count      = static_cast<uint32_t>(m_positions.size());
+        uint32_t dense_width_value   = m_dense_width;
+        uint32_t dense_height_value  = m_dense_height;
     
+        // header
         file.write(reinterpret_cast<const char*>(&width), sizeof(uint32_t));
         file.write(reinterpret_cast<const char*>(&height), sizeof(uint32_t));
         file.write(reinterpret_cast<const char*>(&height_data_size), sizeof(uint32_t));
         file.write(reinterpret_cast<const char*>(&vertex_count), sizeof(uint32_t));
         file.write(reinterpret_cast<const char*>(&index_count), sizeof(uint32_t));
         file.write(reinterpret_cast<const char*>(&tile_count), sizeof(uint32_t));
-        file.write(reinterpret_cast<const char*>(&placement_count), sizeof(uint32_t));
+        file.write(reinterpret_cast<const char*>(&triangle_data_count), sizeof(uint32_t));
         file.write(reinterpret_cast<const char*>(&offset_count), sizeof(uint32_t));
-
+        file.write(reinterpret_cast<const char*>(&position_count), sizeof(uint32_t));
+        file.write(reinterpret_cast<const char*>(&dense_width_value), sizeof(uint32_t));
+        file.write(reinterpret_cast<const char*>(&dense_height_value), sizeof(uint32_t));
+    
+        // main data
         file.write(reinterpret_cast<const char*>(m_height_data.data()), height_data_size * sizeof(float));
         file.write(reinterpret_cast<const char*>(m_vertices.data()), vertex_count * sizeof(RHI_Vertex_PosTexNorTan));
         file.write(reinterpret_cast<const char*>(m_indices.data()), index_count * sizeof(uint32_t));
-        file.write(reinterpret_cast<const char*>(triangle_data.data()), placement_count * sizeof(TriangleData));
         file.write(reinterpret_cast<const char*>(m_tile_offsets.data()), offset_count * sizeof(Vector3));
+        file.write(reinterpret_cast<const char*>(m_positions.data()), position_count * sizeof(Vector3));
     
+        // triangle data
+        for (const auto& [tile_id, tile_triangles] : placement::triangle_data)
+        {
+            file.write(reinterpret_cast<const char*>(&tile_id), sizeof(uint64_t));
+            uint32_t triangle_count = static_cast<uint32_t>(tile_triangles.size());
+            file.write(reinterpret_cast<const char*>(&triangle_count), sizeof(uint32_t));
+            file.write(reinterpret_cast<const char*>(tile_triangles.data()), triangle_count * sizeof(placement::TriangleData));
+        }
+    
+        // tile data
         for (uint32_t i = 0; i < tile_count; i++)
         {
             uint32_t vertex_size = static_cast<uint32_t>(m_tile_vertices[i].size());
-            uint32_t index_size = static_cast<uint32_t>(m_tile_indices[i].size());
+            uint32_t index_size  = static_cast<uint32_t>(m_tile_indices[i].size());
             file.write(reinterpret_cast<const char*>(&vertex_size), sizeof(uint32_t));
             file.write(reinterpret_cast<const char*>(&index_size), sizeof(uint32_t));
             file.write(reinterpret_cast<const char*>(m_tile_vertices[i].data()), vertex_size * sizeof(RHI_Vertex_PosTexNorTan));
@@ -1008,9 +1163,9 @@ namespace spartan
         }
     
         file.close();
-    
-        SP_LOG_INFO("saved terrain to %s: width=%u, height=%u, height_data_size=%u, vertex_count=%u, index_count=%u, tile_count=%u, offset_count=%u",
-                    file_path, width, height, height_data_size, vertex_count, index_count, tile_count, offset_count);
+
+        SP_LOG_INFO("saved terrain to %s: width=%u, height=%u, height_data_size=%u, vertex_count=%u, index_count=%u, tile_count=%u, triangle_data_count=%u, offset_count=%u, position_count=%u, dense_width=%u, dense_height=%u",
+            file_path, width, height, height_data_size, vertex_count, index_count, tile_count, triangle_data_count, offset_count, position_count, dense_width_value, dense_height_value);
     }
     
     void Terrain::LoadFromFile(const char* file_path)
@@ -1019,12 +1174,13 @@ namespace spartan
         if (!file.is_open())
             return;
     
-        uint32_t height_data_size = 0;
-        uint32_t vertex_count     = 0;
-        uint32_t index_count      = 0;
-        uint32_t tile_count       = 0;
-        uint32_t placement_count  = 0;
-        uint32_t offset_count     = 0;
+        uint32_t height_data_size    = 0;
+        uint32_t vertex_count        = 0;
+        uint32_t index_count         = 0;
+        uint32_t tile_count          = 0;
+        uint32_t triangle_data_count = 0;
+        uint32_t offset_count        = 0;
+        uint32_t position_count      = 0;
     
         file.read(reinterpret_cast<char*>(&m_width), sizeof(uint32_t));
         file.read(reinterpret_cast<char*>(&m_height), sizeof(uint32_t));
@@ -1032,9 +1188,12 @@ namespace spartan
         file.read(reinterpret_cast<char*>(&vertex_count), sizeof(uint32_t));
         file.read(reinterpret_cast<char*>(&index_count), sizeof(uint32_t));
         file.read(reinterpret_cast<char*>(&tile_count), sizeof(uint32_t));
-        file.read(reinterpret_cast<char*>(&placement_count), sizeof(uint32_t));
+        file.read(reinterpret_cast<char*>(&triangle_data_count), sizeof(uint32_t));
         file.read(reinterpret_cast<char*>(&offset_count), sizeof(uint32_t));
-
+        file.read(reinterpret_cast<char*>(&position_count), sizeof(uint32_t));
+        file.read(reinterpret_cast<char*>(&m_dense_width), sizeof(uint32_t));
+        file.read(reinterpret_cast<char*>(&m_dense_height), sizeof(uint32_t));
+    
         if (tile_count > 10000 || offset_count > 10000)
         {
             SP_LOG_ERROR("invalid tile_count (%u) or offset_count (%u) read from file, aborting load", tile_count, offset_count);
@@ -1048,31 +1207,41 @@ namespace spartan
         m_tile_vertices.resize(tile_count);
         m_tile_indices.resize(tile_count);
         m_tile_offsets.resize(offset_count);
-        triangle_data.resize(placement_count);
+        m_positions.resize(position_count);
+        placement::triangle_data.clear();
     
         file.read(reinterpret_cast<char*>(m_height_data.data()), height_data_size * sizeof(float));
         file.read(reinterpret_cast<char*>(m_vertices.data()), vertex_count * sizeof(RHI_Vertex_PosTexNorTan));
         file.read(reinterpret_cast<char*>(m_indices.data()), index_count * sizeof(uint32_t));
-        file.read(reinterpret_cast<char*>(triangle_data.data()), placement_count * sizeof(TriangleData));
         file.read(reinterpret_cast<char*>(m_tile_offsets.data()), offset_count * sizeof(Vector3));
+        file.read(reinterpret_cast<char*>(m_positions.data()), position_count * sizeof(Vector3));
+    
+        for (uint32_t i = 0; i < triangle_data_count; i++)
+        {
+            uint64_t tile_id;
+            uint32_t triangle_count;
+            file.read(reinterpret_cast<char*>(&tile_id), sizeof(uint64_t));
+            file.read(reinterpret_cast<char*>(&triangle_count), sizeof(uint32_t));
+            vector<placement::TriangleData>& tile_triangles = placement::triangle_data[tile_id];
+            tile_triangles.resize(triangle_count);
+            file.read(reinterpret_cast<char*>(tile_triangles.data()), triangle_count * sizeof(placement::TriangleData));
+        }
     
         for (uint32_t i = 0; i < tile_count; i++)
         {
             uint32_t vertex_size, index_size;
             file.read(reinterpret_cast<char*>(&vertex_size), sizeof(uint32_t));
             file.read(reinterpret_cast<char*>(&index_size), sizeof(uint32_t));
-    
             m_tile_vertices[i].resize(vertex_size);
             m_tile_indices[i].resize(index_size);
-    
             file.read(reinterpret_cast<char*>(m_tile_vertices[i].data()), vertex_size * sizeof(RHI_Vertex_PosTexNorTan));
             file.read(reinterpret_cast<char*>(m_tile_indices[i].data()), index_size * sizeof(uint32_t));
         }
     
         file.close();
     
-        SP_LOG_INFO("loaded terrain from %s: width=%u, height=%u, height_data_size=%u, vertex_count=%u, index_count=%u, tile_count=%u, offset_count=%u",
-                    file_path, m_width, m_height, height_data_size, vertex_count, index_count, tile_count, offset_count);
+        SP_LOG_INFO("loaded terrain from %s: width=%u, height=%u, height_data_size=%u, vertex_count=%u, index_count=%u, tile_count=%u, triangle_data_count=%u, offset_count=%u, position_count=%u, dense_width=%u, dense_height=%u",
+            file_path, m_width, m_height, height_data_size, vertex_count, index_count, tile_count, triangle_data_count, offset_count, position_count, m_dense_width, m_dense_height);
     }
 
     uint32_t Terrain::GetDensity() const
@@ -1095,7 +1264,7 @@ namespace spartan
         }
     
         // check if height texture is assigned
-        if (!m_height_texture)
+        if (!m_height_map_seed)
         {
             SP_LOG_WARNING("you need to assign a height map before trying to generate a terrain");
             return;
@@ -1125,9 +1294,6 @@ namespace spartan
             }
         }
 
-        vector<Vector3> positions;
-        uint32_t dense_width  = 0;
-        uint32_t dense_height = 0;
         if (!loaded_from_cache)
         {
             SP_LOG_INFO("Terrain not found, generating from scratch...");
@@ -1135,95 +1301,127 @@ namespace spartan
             // 1. process height map
             {
                 ProgressTracker::GetProgress(ProgressType::Terrain).SetText("process height map...");
-                get_values_from_height_map(m_height_data, m_height_texture, m_min_y, m_max_y);
-                m_width  = m_height_texture->GetWidth();
-                m_height = m_height_texture->GetHeight();
+                get_values_from_height_map(m_height_data, m_height_map_seed, m_min_y, m_max_y);
+                m_width  = m_height_map_seed->GetWidth();
+                m_height = m_height_map_seed->GetHeight();
     
                 // increase grid density
                 densify_height_map(m_height_data, m_width, m_height, parameters::density);
-                dense_width  = parameters::density * (m_width - 1) + 1;
-                dense_height = parameters::density * (m_height - 1) + 1;
+                m_dense_width  = parameters::density * (m_width - 1) + 1;
+                m_dense_height = parameters::density * (m_height - 1) + 1;
                 ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
             }
     
             // 2. compute positions
             {
                 ProgressTracker::GetProgress(ProgressType::Terrain).SetText("generating positions...");
-                positions.resize(dense_width * dense_height);
-                generate_positions(positions, m_height_data, dense_width, dense_height);
+                m_positions.resize(m_dense_width * m_dense_height);
+                generate_positions(m_positions, m_height_data, m_dense_width, m_dense_height);
                 ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
             }
 
             // 3. apply perlin noise
             {
                 ProgressTracker::GetProgress(ProgressType::Terrain).SetText("applying Perlin noise...");
-                apply_perlin_noise(positions, dense_width, dense_height);
+                apply_perlin_noise(m_positions, m_dense_width, m_dense_height);
                 ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
             }
 
             // 4. apply hydraulic and wind erosion
             {
                 ProgressTracker::GetProgress(ProgressType::Terrain).SetText("applying hydraulic and wind erosion...");
-                apply_erosion(positions, dense_width, dense_height);
+                apply_erosion(m_positions, m_dense_width, m_dense_height);
                 ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
             }
-    
+
             // 5. compute vertices and indices
             {
                 ProgressTracker::GetProgress(ProgressType::Terrain).SetText("generating vertices and indices...");
-                m_vertices.resize(dense_width * dense_height);
-                m_indices.resize((dense_width - 1) * (dense_height - 1) * 6);
-                generate_vertices_and_indices(m_vertices, m_indices, positions, dense_width, dense_height);
+                m_vertices.resize(m_dense_width * m_dense_height);
+                m_indices.resize((m_dense_width - 1) * (m_dense_height - 1) * 6);
+                generate_vertices_and_indices(m_vertices, m_indices, m_positions, m_dense_width, m_dense_height);
                 ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
             }
     
             // 6. compute normals and tangents
             {
                 ProgressTracker::GetProgress(ProgressType::Terrain).SetText("generating normals...");
-                generate_normals(m_vertices, dense_width, dense_height);
+                generate_normals(m_vertices, m_dense_width, m_dense_height);
                 ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
             }
     
-            // 7. compute triangle data for placement
-            {
-                ProgressTracker::GetProgress(ProgressType::Terrain).SetText("computing triangle data for placement...");
-                compute_triangle_data(m_vertices, m_indices);
-                ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
-            }
-    
-            // 8. split into tiles
+            // 7. split into tiles
             {
                 ProgressTracker::GetProgress(ProgressType::Terrain).SetText("splitting into tiles...");
                 uint32_t tile_count = 16;
-                spartan::geometry_processing::split_surface_into_tiles(m_vertices, m_indices, tile_count, m_tile_vertices, m_tile_indices, m_tile_offsets);
+                geometry_processing::split_surface_into_tiles(m_vertices, m_indices, tile_count, m_tile_vertices, m_tile_indices, m_tile_offsets);
+                ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
+            }
+
+            // 8. compute triangle data for placement
+            {
+                ProgressTracker::GetProgress(ProgressType::Terrain).SetText("computing triangle data for placement...");
+                for (uint32_t tile_index = 0; tile_index < m_tile_vertices.size(); tile_index++)
+                {
+                    placement::compute_triangle_data(m_tile_vertices, m_tile_indices, tile_index);
+                }
                 ProgressTracker::GetProgress(ProgressType::Terrain).JobDone();
             }
 
             SaveToFile(cache_file.c_str());
         }
+
+        // bake terrain into a texture
+        {
+            vector<RHI_Texture_Slice> data(1);
+            auto& slice = data[0];
+            slice.mips.resize(1);
+            auto& mip_bytes = slice.mips[0].bytes;
+            mip_bytes.resize(m_dense_width * m_dense_height * sizeof(float));
+        
+            auto copy_heights = [this, &mip_bytes](uint32_t start, uint32_t end)
+            {
+                for (uint32_t i = start; i < end; i++)
+                {
+                    memcpy(mip_bytes.data() + i * sizeof(float), &m_positions[i].y, sizeof(float));
+                }
+            };
+            ThreadPool::ParallelLoop(copy_heights, m_dense_width * m_dense_height);
+        
+            m_height_map_final = make_shared<RHI_Texture>(
+                RHI_Texture_Type::Type2D,
+                m_dense_width,
+                m_dense_height,
+                1,
+                1,
+                RHI_Format::R32_Float,
+                RHI_Texture_Srv,
+                "terrain_baked",
+                data
+            );
+        }
     
         // compute certain properties
-        m_height_samples = dense_width * dense_height;
+        m_height_samples = m_dense_width * m_dense_height;
         m_vertex_count   = static_cast<uint32_t>(m_vertices.size());
         m_index_count    = static_cast<uint32_t>(m_indices.size());
         m_triangle_count = m_index_count / 3;
         m_area_km2       = compute_surface_area_km2(m_vertices, m_indices);
 
-        // 9. create a mesh for each tile
+        // 9. create an entity for each tile and create a single gpu-buffer (for now)
         {
             ProgressTracker::GetProgress(ProgressType::Terrain).SetText("creating gpu mesh...");
             m_mesh = make_shared<Mesh>();
             m_mesh->SetObjectName("terrain_mesh");
-            m_mesh->SetFlag(static_cast<uint32_t>(MeshFlags::PostProcessOptimize), false);
-            m_mesh->SetFlag(static_cast<uint32_t>(MeshFlags::PostProcessPreserveTerrainEdges), true); // so that nearby tiles with low lods don't have visible seams
-            m_mesh->SetLodDropoff(MeshLodDropoff::Linear);
-    
+            m_mesh->SetFlag(static_cast<uint32_t>(MeshFlags::PostProcessOptimize), false);            // meshes are build to spec, so don't mesh with them
+            m_mesh->SetFlag(static_cast<uint32_t>(MeshFlags::PostProcessPreserveTerrainEdges), true); // preserve edges when generating lods, to ensure the tiles meet each other
+
             for (uint32_t tile_index = 0; tile_index < static_cast<uint32_t>(m_tile_vertices.size()); tile_index++)
             {
                 uint32_t sub_mesh_index = 0;
                 m_mesh->AddGeometry(m_tile_vertices[tile_index], m_tile_indices[tile_index], true, &sub_mesh_index);
                 Entity* entity = World::CreateEntity();
-                entity->SetObjectName("tile_" + to_string(tile_index));
+                entity->SetObjectName("tile_" + to_string(tile_index + 1)); // +1 so it makes more sense in the editor
                 entity->SetParent(GetEntity());
                 entity->SetPosition(m_tile_offsets[tile_index]);
 

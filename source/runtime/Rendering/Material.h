@@ -1,4 +1,4 @@
-#/*
+/*
 Copyright(c) 2015-2025 Panos Karabelas
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -83,10 +83,13 @@ namespace spartan
         TextureTilingY,             // tiling along y axis
         TextureOffsetX,             // offset along x axis
         TextureOffsetY,             // offset along y axis
+        TextureInvertX,             // invert texture along x axis (mirror horizontally)
+        TextureInvertY,             // invert texture along y axis (mirror vertically)
     
         // special effects
         IsTerrain,                  // slope-based texture mapping
         IsGrassBlade,               // grass blade specific effects
+        IsFlower,                   // flower specific effects
         WindAnimation,              // vertex wind animation
         ColorVariationFromInstance, // per-instance color variation
         IsWater,                    // water flow animation
@@ -154,5 +157,6 @@ namespace spartan
         std::array<RHI_Texture*, static_cast<uint32_t>(MaterialTextureType::Max) * slots_per_texture> m_textures;
         std::array<float, static_cast<uint32_t>(MaterialProperty::Max)> m_properties;
         uint32_t m_index = 0;
+        std::mutex m_mutex;
     };
 }

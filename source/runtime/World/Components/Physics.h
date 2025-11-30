@@ -47,7 +47,6 @@ namespace spartan
         Capsule,
         Mesh,
         Controller,
-        Water,
         Max
     };
 
@@ -66,7 +65,7 @@ namespace spartan
         // component
         void Initialize() override;
         void Remove() override;
-        void OnTick() override;
+        void Tick() override;
         void Save(pugi::xml_node& node) override;
         void Load(pugi::xml_node& node) override;
 
@@ -152,7 +151,7 @@ namespace spartan
         void* m_controller             = nullptr;
         void* m_material               = nullptr;
         void* m_mesh                   = nullptr;
-        std::vector<void*> m_bodies    = { nullptr };
+        std::vector<void*> m_actors    = { nullptr };
         std::vector<PhysicsBodyMeshData> m_mesh_data;
     };
 }

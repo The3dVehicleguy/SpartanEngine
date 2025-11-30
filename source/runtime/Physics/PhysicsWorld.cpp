@@ -49,6 +49,11 @@ using namespace physx;
 
 namespace spartan
 {
+    namespace
+    {
+        mutex scene_mutex;
+    }
+
     namespace settings
     {
         float gravity = -9.81f; // gravity value in m/s^2
@@ -210,11 +215,11 @@ namespace spartan
 
         // scene
         PxSceneDesc scene_desc(physics->getTolerancesScale());
-        scene_desc.gravity = PxVec3(0.0f, settings::gravity, 0.0f);
-        scene_desc.cpuDispatcher = PxDefaultCpuDispatcherCreate(2);
-        scene_desc.filterShader = PxDefaultSimulationFilterShader;
-        scene_desc.flags |= PxSceneFlag::eENABLE_CCD; // enable continuous collision detection to reduce tunneling
-        scene = physics->createScene(scene_desc);
+        scene_desc.gravity        = PxVec3(0.0f, settings::gravity, 0.0f);
+        scene_desc.cpuDispatcher  = PxDefaultCpuDispatcherCreate(2);
+        scene_desc.filterShader   = PxDefaultSimulationFilterShader;
+        scene_desc.flags         |= PxSceneFlag::eENABLE_CCD; // enable continuous collision detection to reduce tunneling
+        scene                     = physics->createScene(scene_desc);
         SP_ASSERT(scene);
 
         // store dispatcher
@@ -304,6 +309,24 @@ namespace spartan
                 );
                 Renderer::DrawLine(start, end, color, color);
             }
+        }
+    }
+
+    void PhysicsWorld::AddActor(PxRigidActor* actor)
+    {
+        if (actor && scene && !actor->getScene())
+        {
+            lock_guard<mutex> lock(scene_mutex);
+            scene->addActor(*actor);
+        }
+    }
+
+    void PhysicsWorld::RemoveActor(PxRigidActor* actor)
+    {
+        if (actor && scene && actor->getScene() == scene)
+        {
+            lock_guard<mutex> lock(scene_mutex);
+            scene->removeActor(*actor);
         }
     }
 

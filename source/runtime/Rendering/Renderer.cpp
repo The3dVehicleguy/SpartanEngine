@@ -19,7 +19,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-//= INCLUDES ===========================
+//= INCLUDES ================================
 #include "pch.h"
 #include "Renderer.h"
 #include "Material.h"
@@ -36,12 +36,14 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI/RHI_Implementation.h"
 #include "../RHI/RHI_Buffer.h"
 #include "../RHI/RHI_VendorTechnology.h"
+#include "../RHI/RHI_AccelerationStructure.h"
 #include "../World/Entity.h"
 #include "../World/Components/Light.h"
 #include "../World/Components/Camera.h"
 #include "../Core/ProgressTracker.h"
 #include "../Math/Rectangle.h"
-//======================================
+#include "../Resource/Import/ImageImporter.h"
+//===========================================
 
 //= NAMESPACES ===============
 using namespace std;
@@ -65,10 +67,11 @@ namespace spartan
     bool Renderer::m_transparents_present          = false;
     bool Renderer::m_bindless_samplers_dirty       = true;
     RHI_CommandList* Renderer::m_cmd_list_present  = nullptr;
+    vector<ShadowSlice> Renderer::m_shadow_slices;
     array<RHI_Texture*, rhi_max_array_size> Renderer::m_bindless_textures;
     array<Sb_Light, rhi_max_array_size> Renderer::m_bindless_lights;
     array<Sb_Aabb, rhi_max_array_size> Renderer::m_bindless_aabbs;
-    vector<ShadowSlice> Renderer::m_shadow_slices;
+    unique_ptr<RHI_AccelerationStructure> tlas;
 
     namespace
     {
@@ -89,6 +92,7 @@ namespace spartan
         float near_plane                     = 0.0f;
         float far_plane                      = 1.0f;
         bool dirty_orthographic_projection   = true;
+ 
 
         void dynamic_resolution()
         {
@@ -140,10 +144,11 @@ namespace spartan
             SetOption(Renderer_Option::DepthOfField,                1.0f);
             SetOption(Renderer_Option::ScreenSpaceAmbientOcclusion, 1.0f);
             SetOption(Renderer_Option::ScreenSpaceReflections,      1.0f);
+            SetOption(Renderer_Option::RayTracedReflections,        RHI_Device::IsSupportedRayTracing() ? 0.0f : 0.0f);
             SetOption(Renderer_Option::Anisotropy,                  16.0f);
             SetOption(Renderer_Option::Sharpness,                   0.0f);  // becomes the upscaler's sharpness as well
             SetOption(Renderer_Option::Fog,                         1.0);   // controls the intensity of the distance/height and volumetric fog, it's the particle density
-            SetOption(Renderer_Option::AntiAliasing_Upsampling,      static_cast<float>(Renderer_AntiAliasing_Upsampling::AA_Fsr_Upscale_Fsr));
+            SetOption(Renderer_Option::AntiAliasing_Upsampling,     static_cast<float>(Renderer_AntiAliasing_Upsampling::AA_Fsr_Upscale_Fsr));
             SetOption(Renderer_Option::ResolutionScale,             1.0f);
             SetOption(Renderer_Option::VariableRateShading,         0.0f);
             SetOption(Renderer_Option::Vsync,                       0.0f);
@@ -158,7 +163,12 @@ namespace spartan
             SetOption(Renderer_Option::Gamma,                       Display::GetGamma());
             SetOption(Renderer_Option::AutoExposureAdaptationSpeed, 0.5f);
 
-            SetWind(Vector3(1.0f, 0.0f, 0.5f) * 2.5f);
+            // set wind direction and strength
+            {
+                float rotation_y      = 120.0f * math::deg_to_rad;
+                const float intensity = 3.0f; // meters per second
+                SetWind(Vector3(sin(rotation_y), 0.0f, cos(rotation_y)) * intensity);
+            }
         }
 
         // resolution
@@ -257,11 +267,15 @@ namespace spartan
         // wait for all commands list, from all queues, to finish executing
         RHI_Device::QueueWaitAll();
 
+        RHI_CommandList::ImmediateExecutionShutdown();
+
         // manually destroy everything so that RHI_Device::ParseDeletionQueue() frees memory
         {
             DestroyResources();
             swapchain             = nullptr;
             m_lines_vertex_buffer = nullptr;
+            tlas                  = nullptr;
+            m_std_reflections     = nullptr;
         }
 
         RHI_VendorTechnology::Shutdown();
@@ -275,7 +289,7 @@ namespace spartan
         {
             swapchain->AcquireNextImage();
             RHI_Device::Tick(frame_num);
-            RHI_VendorTechnology::Tick(&m_cb_frame_cpu);
+            RHI_VendorTechnology::Tick(&m_cb_frame_cpu, GetResolutionRender(), GetResolutionOutput(), GetOption<float>(Renderer_Option::ResolutionScale));
             dynamic_resolution();
         }
     
@@ -285,11 +299,14 @@ namespace spartan
             m_cmd_list_present = queue_graphics->NextCommandList();
             m_cmd_list_present->Begin();
         }
-    
+
         // update CPU and GPU resources
         {
             // fill draw call list and determine ideal occluders
             UpdateDrawCalls(m_cmd_list_present);
+
+            // update tlas
+            UpdateAccelerationStructures(m_cmd_list_present);
     
             // handle dynamic buffers and resource deletion
             {
@@ -549,19 +566,19 @@ namespace spartan
             m_cb_frame_cpu.camera_last_movement_time           = (m_cb_frame_cpu.camera_position - m_cb_frame_cpu.camera_position_previous).LengthSquared() != 0.0f
                 ? static_cast<float>(Timer::GetTimeSec()) : m_cb_frame_cpu.camera_last_movement_time;
         }
-        m_cb_frame_cpu.resolution_output           = m_resolution_output;
-        m_cb_frame_cpu.resolution_render           = m_resolution_render;
-        m_cb_frame_cpu.taa_jitter_previous         = m_cb_frame_cpu.taa_jitter_current;
-        m_cb_frame_cpu.taa_jitter_current          = jitter_offset;
-        m_cb_frame_cpu.time                        = Timer::GetTimeSec();
-        m_cb_frame_cpu.delta_time                  = static_cast<float>(Timer::GetDeltaTimeSec());
-        m_cb_frame_cpu.frame                       = static_cast<uint32_t>(frame_num);
-        m_cb_frame_cpu.resolution_scale            = GetOption<float>(Renderer_Option::ResolutionScale);
-        m_cb_frame_cpu.hdr_enabled                 = GetOption<bool>(Renderer_Option::Hdr) ? 1.0f : 0.0f;
-        m_cb_frame_cpu.hdr_max_nits                = Display::GetLuminanceMax();
-        m_cb_frame_cpu.hdr_white_point             = GetOption<float>(Renderer_Option::WhitePoint);
-        m_cb_frame_cpu.gamma                       = GetOption<float>(Renderer_Option::Gamma);
-        m_cb_frame_cpu.camera_exposure             = World::GetCamera() ? World::GetCamera()->GetExposure() : 1.0f;
+        m_cb_frame_cpu.resolution_output   = m_resolution_output;
+        m_cb_frame_cpu.resolution_render   = m_resolution_render;
+        m_cb_frame_cpu.taa_jitter_previous = m_cb_frame_cpu.taa_jitter_current;
+        m_cb_frame_cpu.taa_jitter_current  = jitter_offset;
+        m_cb_frame_cpu.time                = Timer::GetTimeSec();
+        m_cb_frame_cpu.delta_time          = static_cast<float>(Timer::GetDeltaTimeSec());
+        m_cb_frame_cpu.frame               = static_cast<uint32_t>(frame_num);
+        m_cb_frame_cpu.resolution_scale    = GetOption<float>(Renderer_Option::ResolutionScale);
+        m_cb_frame_cpu.hdr_enabled         = GetOption<bool>(Renderer_Option::Hdr) ? 1.0f : 0.0f;
+        m_cb_frame_cpu.hdr_max_nits        = Display::GetLuminanceMax();
+        m_cb_frame_cpu.hdr_white_point     = GetOption<float>(Renderer_Option::WhitePoint);
+        m_cb_frame_cpu.gamma               = GetOption<float>(Renderer_Option::Gamma);
+        m_cb_frame_cpu.camera_exposure     = World::GetCamera() ? World::GetCamera()->GetExposure() : 1.0f;
 
         // these must match what common_buffer.hlsl is reading
         m_cb_frame_cpu.set_bit(GetOption<bool>(Renderer_Option::ScreenSpaceReflections),      1 << 0);
@@ -665,7 +682,7 @@ namespace spartan
             {
                 if (value == 1.0f)
                 {
-                    if (!RHI_Device::PropertyIsShadingRateSupported())
+                    if (!RHI_Device::IsSupportedVrs())
                     { 
                         SP_LOG_WARNING("This GPU doesn't support variable rate shading");
                         return;
@@ -676,7 +693,7 @@ namespace spartan
             {
                 if (value == static_cast<float>(Renderer_AntiAliasing_Upsampling::AA_Xess_Upscale_Xess))
                 {
-                    if (!RHI_Device::PropertyIsXessSupported())
+                    if (!RHI_Device::IsSupportedXess())
                     { 
                         SP_LOG_WARNING("This GPU doesn't support XeSS");
                         return;
@@ -812,6 +829,8 @@ namespace spartan
                 properties[count].tiling_uv.y           = material->GetProperty(MaterialProperty::TextureTilingY);
                 properties[count].offset_uv.x           = material->GetProperty(MaterialProperty::TextureOffsetX);
                 properties[count].offset_uv.y           = material->GetProperty(MaterialProperty::TextureOffsetY);
+                properties[count].invert_uv.x           = material->GetProperty(MaterialProperty::TextureInvertX);
+                properties[count].invert_uv.y           = material->GetProperty(MaterialProperty::TextureInvertY);
                 properties[count].roughness_mul         = material->GetProperty(MaterialProperty::Roughness);
                 properties[count].metallic_mul          = material->GetProperty(MaterialProperty::Metalness);
                 properties[count].normal_mul            = material->GetProperty(MaterialProperty::Normal);
@@ -837,9 +856,10 @@ namespace spartan
                 properties[count].flags |= material->GetProperty(MaterialProperty::WindAnimation)              ? (1U << 9)  : 0;
                 properties[count].flags |= material->GetProperty(MaterialProperty::ColorVariationFromInstance) ? (1U << 10) : 0;
                 properties[count].flags |= material->GetProperty(MaterialProperty::IsGrassBlade)               ? (1U << 11) : 0;
-                properties[count].flags |= material->GetProperty(MaterialProperty::IsWater)                    ? (1U << 12) : 0;
-                properties[count].flags |= material->GetProperty(MaterialProperty::Tessellation)               ? (1U << 13) : 0;
-                properties[count].flags |= material->GetProperty(MaterialProperty::EmissiveFromAlbedo)         ? (1U << 14) : 0;
+                properties[count].flags |= material->GetProperty(MaterialProperty::IsFlower)                   ? (1U << 12) : 0;
+                properties[count].flags |= material->GetProperty(MaterialProperty::IsWater)                    ? (1U << 13) : 0;
+                properties[count].flags |= material->GetProperty(MaterialProperty::Tessellation)               ? (1U << 14) : 0;
+                properties[count].flags |= material->GetProperty(MaterialProperty::EmissiveFromAlbedo)         ? (1U << 15) : 0;
                 // when changing the bit flags, ensure that you also update the Surface struct in common_structs.hlsl, so that it reads those flags as expected
             }
     
@@ -994,11 +1014,11 @@ namespace spartan
                         continue;
                 }
 
-                // skip point/spot lights beyond 100 meters
                 if (light_component->GetLightType() != LightType::Directional)
                 {
-                    const float dist2 = Vector3::DistanceSquared(light_component->GetEntity()->GetPosition(), camera_pos);
-                    if (dist2 > 10000.0f) // 100 meters squared
+                    const float distance_squared      = Vector3::DistanceSquared(light_component->GetEntity()->GetPosition(), camera_pos);
+                    const float draw_distance_squared = light_component->GetDrawDistance() * light_component->GetDrawDistance();
+                    if (distance_squared > draw_distance_squared)
                         continue;
                 }
 
@@ -1023,7 +1043,7 @@ namespace spartan
         {
             const Renderer_DrawCall& draw_call   = m_draw_calls[i];
             Renderable* renderable               = draw_call.renderable;
-            const BoundingBox& aabb              = renderable->HasInstancing() ? renderable->GetBoundingBoxInstanceGroup(draw_call.instance_group_index) : renderable->GetBoundingBox();
+            const BoundingBox& aabb              = renderable->GetBoundingBox();
             m_bindless_aabbs[count].min          = aabb.GetMin();
             m_bindless_aabbs[count].max          = aabb.GetMax();
             m_bindless_aabbs[count].is_occluder  = draw_call.is_occluder;
@@ -1038,59 +1058,41 @@ namespace spartan
 
     void Renderer::UpdateDrawCalls(RHI_CommandList* cmd_list)
     {
-        m_draw_call_count = 0;
-
+        m_draw_call_count          = 0;
+        m_draw_calls_prepass_count = 0;
+        m_transparents_present     = false;
         if (ProgressTracker::IsLoading())
             return;
 
-        // build draw calls and sort them
-        {  
+        // build draw calls and sort them for g-buffer (transparency -> material -> depth)
+        {
             for (Entity* entity : World::GetEntities())
             {
                 if (!entity->GetActive())
                     continue;
-        
+
                 if (Renderable* renderable = entity->GetComponent<Renderable>())
                 {
                     // skip renderables with no material, can happen when loading a world and the material is not yet loaded
                     if (!renderable->GetMaterial())
                         continue;
-        
+
                     if (renderable->GetMaterial()->IsTransparent())
                     {
                         m_transparents_present = true;
                     }
-            
-                    if (renderable->HasInstancing())
-                    {
-                        for (uint32_t group_index = 0; group_index < renderable->GetInstanceGroupCount(); group_index++)
-                        {
-                            Renderer_DrawCall& draw_call   = m_draw_calls[m_draw_call_count++];
-                            draw_call.renderable           = renderable;
-                            draw_call.distance_squared     = renderable->GetDistanceSquared(group_index);
-                            draw_call.lod_index            = renderable->GetLodIndex(group_index);
-                            draw_call.is_occluder          = false;
-                            draw_call.camera_visible       = renderable->IsVisible(group_index);
-                            draw_call.instance_group_index = group_index;
-                            draw_call.instance_index       = renderable->GetInstanceGroupStartIndex(group_index);
-                            draw_call.instance_count       = renderable->GetInstanceGroupCount(group_index);
-                        }
-                    }
-                    else
-                    {
-                        Renderer_DrawCall& draw_call   = m_draw_calls[m_draw_call_count++];
-                        draw_call.renderable           = renderable;
-                        draw_call.distance_squared     = renderable->GetDistanceSquared();
-                        draw_call.lod_index            = renderable->GetLodIndex();
-                        draw_call.is_occluder          = false;
-                        draw_call.camera_visible       = renderable->IsVisible();
-                        draw_call.instance_group_index = 0;
-                        draw_call.instance_index       = 0;
-                        draw_call.instance_count       = 1;
-                    }
+
+                    Renderer_DrawCall& draw_call = m_draw_calls[m_draw_call_count++];
+                    draw_call.renderable         = renderable;
+                    draw_call.distance_squared   = renderable->GetDistanceSquared();
+                    draw_call.lod_index          = renderable->GetLodIndex();
+                    draw_call.is_occluder        = false;
+                    draw_call.camera_visible     = renderable->IsVisible();
+                    draw_call.instance_index     = 0;
+                    draw_call.instance_count     = renderable->GetInstanceCount();
                 }
             }
-        
+
             // sort by transparency, material id, and distance (front-to-back for opaque, back-to-front for transparent)
             sort(m_draw_calls.begin(), m_draw_calls.begin() + m_draw_call_count, [](const Renderer_DrawCall& a, const Renderer_DrawCall& b)
             {
@@ -1101,7 +1103,7 @@ namespace spartan
                 {
                     return !a_transparent; // false (opaque) before true (transparent)
                 }
-                
+
                 // step 2: sort by material id within each transparency group
                 uint64_t a_material_id = a.renderable->GetMaterial()->GetObjectId();
                 uint64_t b_material_id = b.renderable->GetMaterial()->GetObjectId();
@@ -1109,7 +1111,7 @@ namespace spartan
                 {
                     return a_material_id < b_material_id; // lower material ids first
                 }
-                
+
                 // step 3: sort by distance within each material group
                 if (!a_transparent) // both are opaque
                 {
@@ -1121,7 +1123,31 @@ namespace spartan
                 }
             });
         }
-        
+
+        // build prepass calls: opaques only, sorted by alpha test (non-alpha first), then depth front-to-back
+        {
+            for (uint32_t i = 0; i < m_draw_call_count; ++i)
+            {
+                const Renderer_DrawCall& dc = m_draw_calls[i];
+                if (!dc.renderable->GetMaterial()->IsTransparent() && dc.camera_visible)
+                {
+                    m_draw_calls_prepass[m_draw_calls_prepass_count++] = dc;
+                }
+            }
+
+            // sort prepass by alpha test flag, then distance_squared (front-to-back)
+            sort(m_draw_calls_prepass.begin(), m_draw_calls_prepass.begin() + m_draw_calls_prepass_count, [](const Renderer_DrawCall& a, const Renderer_DrawCall& b)
+            {
+                bool a_alpha = a.renderable->GetMaterial()->IsAlphaTested();
+                bool b_alpha = b.renderable->GetMaterial()->IsAlphaTested();
+                if (a_alpha != b_alpha)
+                {
+                    return !a_alpha; // non-alpha before alpha-tested
+                }
+                return a.distance_squared < b.distance_squared;
+            });
+        }
+
         // select occluders by finding the top n largest screen-space bounding boxes
         {
             // lambda to compute screen-space area of a bounding box
@@ -1130,57 +1156,129 @@ namespace spartan
                 // project aabb to screen space using camera function
                 float area = 0.0f;
                 if (Camera* camera = World::GetCamera())
-                { 
+                {
                     math::Rectangle rect_screen = World::GetCamera()->WorldToScreenCoordinates(aabb_world);
-            
+
                     // compute screen-space dimensions
                     area = clamp(rect_screen.width * rect_screen.height, 0.0f, numeric_limits<float>::max());
                 }
-        
+
                 return area;
             };
-        
+
             // temporary storage for draw call areas
             struct DrawCallArea
             {
                 uint32_t index;
                 float area;
             };
-            static std::vector<DrawCallArea> areas;
-            areas.clear();                    // clear old data
-            areas.reserve(m_draw_call_count); // ensure enough capacity
-        
-            // collect screen-space areas for eligible draw calls
-            for (uint32_t i = 0; i < m_draw_call_count; i++)
+            static vector<DrawCallArea> areas;
+            areas.clear(); // clear old data
+            areas.reserve(m_draw_calls_prepass_count); // ensure enough capacity
+
+            // collect screen-space areas for eligible draw calls from prepass
+            for (uint32_t i = 0; i < m_draw_calls_prepass_count; i++)
             {
-                Renderer_DrawCall& draw_call = m_draw_calls[i];
-                Renderable* renderable       = draw_call.renderable;
-                Material* material           = renderable->GetMaterial();
-        
+                Renderer_DrawCall& draw_call = m_draw_calls_prepass[i];
+                Renderable* renderable = draw_call.renderable;
+                Material* material = renderable->GetMaterial();
+
                 // skip any draw calls that have a mesh that you can see through (transparent, instanced, non-solid)
                 if (!material || material->IsTransparent() || renderable->HasInstancing() || !draw_call.camera_visible)
                     continue;
-        
+
                 // get bounding box
                 const BoundingBox& aabb_world = renderable->GetBoundingBox();
-                
+
                 // compute screen-space area and store it
                 float screen_area = compute_screen_space_area(aabb_world);
-                areas.push_back({i, screen_area});
+                areas.push_back({ i, screen_area });
             }
-        
+
             // sort draw calls by screen-space area (descending)
             sort(areas.begin(), areas.end(), [](const DrawCallArea& a, const DrawCallArea& b)
             {
                 return a.area > b.area;
             });
-        
+
             // select the top n occluders
             const uint32_t max_occluders = 64;
-            uint32_t occluder_count      = min(max_occluders, static_cast<uint32_t>(areas.size()));
+            uint32_t occluder_count = min(max_occluders, static_cast<uint32_t>(areas.size()));
             for (uint32_t i = 0; i < occluder_count; i++)
             {
-                m_draw_calls[areas[i].index].is_occluder = true;
+                m_draw_calls_prepass[areas[i].index].is_occluder = true;
+            }
+        }
+    }
+
+    void Renderer::UpdateAccelerationStructures(RHI_CommandList* cmd_list)
+    {
+        return;
+
+        // validate ray tracing and command list
+        if (!RHI_Device::IsSupportedRayTracing() || !cmd_list)
+        {
+            SP_LOG_WARNING("Ray tracing or command list invalid, skipping update");
+            return;
+        }
+
+        // bottom-level acceleration structures
+        {
+            for (Entity* entity : World::GetEntities())
+            {
+                if (!entity->GetActive())
+                    continue;
+
+                if (Renderable* renderable = entity->GetComponent<Renderable>())
+                {
+                    if (!renderable->HasAccelerationStructure())
+                    {
+                        renderable->BuildAccelerationStructure(cmd_list);
+                    }
+                }
+            }
+        }
+
+        // top-level acceleration structure
+        {
+            // create or rebuild tlas
+            if (!tlas)
+            {
+                tlas = make_unique<RHI_AccelerationStructure>(RHI_AccelerationStructureType::Top, "world_tlas");
+            }
+
+            // temp till we make rhi enum
+            constexpr uint32_t RHI_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT = 0x00000002; // matches VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
+
+            vector<RHI_AccelerationStructureInstance> instances;
+            for (Entity* entity : World::GetEntities())
+            {
+                if (!entity->GetActive())
+                    continue;
+    
+               if (Renderable* renderable = entity->GetComponent<Renderable>())
+                {
+                    if (Material* material = renderable->GetMaterial())
+                    {
+                        RHI_CullMode cull_mode = static_cast<RHI_CullMode>(material->GetProperty(MaterialProperty::CullMode));
+
+                        RHI_AccelerationStructureInstance instance           = {};
+                        instance.instance_custom_index                       = material->GetIndex(); // for hit shader material lookup
+                        instance.mask                                        = 0xFF;                 // visible to all rays
+                        instance.instance_shader_binding_table_record_offset = 0;                    // sbt hit group offset
+                        instance.flags                                       = cull_mode == RHI_CullMode::None ? RHI_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT : 0;
+                        instance.device_address                              = renderable->GetAccelerationStructureDeviceAddress();
+                        Matrix world_matrix                                  = renderable->GetEntity()->GetMatrix().Transposed();
+                        copy(world_matrix.Data(), world_matrix.Data() + 12, instance.transform.begin()); // convert column-major 4x4 to row-major 3x4
+
+                        instances.push_back(instance);
+                    }
+                }
+            }
+    
+            if (!instances.empty())
+            {
+                tlas->BuildTopLevel(cmd_list, instances);
             }
         }
     }
@@ -1317,8 +1415,40 @@ namespace spartan
         }
     }
 
-    void Renderer::Screenshot(const string& file_path)
+    void Renderer::Screenshot()
     {
-        GetRenderTarget(Renderer_RenderTarget::frame_output)->SaveAsImage(file_path);
+        RHI_Texture* frame_output = GetRenderTarget(Renderer_RenderTarget::frame_output);
+        uint32_t width            = frame_output->GetWidth();
+        uint32_t height           = frame_output->GetHeight();
+        RHI_Format format         = frame_output->GetFormat();
+        uint32_t bits_per_channel = frame_output->GetBitsPerChannel();
+        uint32_t channel_count    = frame_output->GetChannelCount();
+        size_t data_size          = static_cast<size_t>(width) * height * (bits_per_channel / 8) * channel_count;
+        
+        // create staging buffer (linear: element_count=1, stride=data_size; mappable=true for coherent host-visible)
+        auto staging = make_unique<RHI_Buffer>(RHI_Buffer_Type::Constant, data_size, 1, nullptr, true, "screenshot_staging");
+        
+        // copy image to buffer
+        if (RHI_CommandList* cmd_list = RHI_CommandList::ImmediateExecutionBegin(RHI_Queue_Type::Graphics))
+        {
+            cmd_list->CopyTextureToBuffer(frame_output, staging.get());
+            RHI_CommandList::ImmediateExecutionEnd(cmd_list);
+        }
+        
+        // read mapped data (coherent, so direct access post-submit)
+        void* mapped_data = staging->GetMappedData();
+        SP_ASSERT_MSG(mapped_data, "Staging buffer not mappable");
+
+        spartan::ThreadPool::AddTask([width, height, channel_count, bits_per_channel, mapped_data]()
+        {
+            SP_LOG_INFO("Saving screenshot...");
+            ImageImporter::Save("screenshot.exr", width, height, channel_count, bits_per_channel, mapped_data);
+            SP_LOG_INFO("Screenshot saved as 'screenshot.exr'");
+        });
+    }
+
+    RHI_AccelerationStructure* Renderer::GetTopLevelAccelerationStructure()
+    {
+        return tlas.get();
     }
 }

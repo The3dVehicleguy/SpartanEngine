@@ -62,6 +62,10 @@ namespace spartan
         const float standing_height     = 1.8f;
         const float crouch_height       = 0.7f;
 
+        // derivatives
+        const float distance_deactivate_squared = distance_deactivate * distance_deactivate;
+        const float distance_activate_squared   = distance_activate * distance_activate;
+
         void* controller_manager = nullptr;
     }
 
@@ -76,6 +80,12 @@ namespace spartan
         SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_position_lock, Vector3);
         SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_rotation_lock, Vector3);
         SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_center_of_mass, Vector3);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_velocity, Vector3);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_controller, void*);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_material, void*);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_mesh, void*);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_actors, vector<void*>);
+        SP_REGISTER_ATTRIBUTE_VALUE_VALUE(m_mesh_data, vector<PhysicsBodyMeshData>);
         SP_REGISTER_ATTRIBUTE_VALUE_SET(m_body_type, SetBodyType, BodyType);
     }
 
@@ -98,22 +108,16 @@ namespace spartan
             m_material   = nullptr; // the controller owns the material
         }
 
-        for (auto* body : m_bodies)
+        for (auto* body : m_actors)
         {
             if (body)
             {
                 PxRigidActor* actor = static_cast<PxRigidActor*>(body);
-                PxScene* scene      = static_cast<PxScene*>(PhysicsWorld::GetScene());
-        
-                if (actor->getScene())
-                {
-                    scene->removeActor(*actor);
-                }
-
+                PhysicsWorld::RemoveActor(actor);
                 actor->release();
             }
         }
-        m_bodies.clear();
+        m_actors.clear();
 
         if (PxMaterial* material = static_cast<PxMaterial*>(m_material))
         {
@@ -122,7 +126,7 @@ namespace spartan
         }
     }
 
-    void Physics::OnTick()
+    void Physics::Tick()
     {
         // map transform from physx to engine and vice versa
         if (m_body_type == BodyType::Controller)
@@ -163,22 +167,19 @@ namespace spartan
         else if (!m_is_static)
         {
             Renderable* renderable = GetEntity()->GetComponent<Renderable>();
-            const static vector<math::Matrix> empty_instances;
-            const vector<math::Matrix>& instances = renderable ? renderable->GetInstances() : empty_instances;
-            bool has_instances = !instances.empty();
-            for (size_t i = 0; i < m_bodies.size(); i++)
+            for (uint32_t i = 0; i < m_actors.size(); i++)
             {
-                PxRigidActor* actor = static_cast<PxRigidActor*>(m_bodies[i]);
+                PxRigidActor* actor     = static_cast<PxRigidActor*>(m_actors[i]);
                 PxRigidDynamic* dynamic = actor->is<PxRigidDynamic>();
                 if (Engine::IsFlagSet(EngineMode::Playing))
                 {
                     if (m_is_kinematic && dynamic)
                     {
-                        // Sync entity -> PhysX (kinematic target)
+                        // sync entity -> physX (kinematic target)
                         math::Matrix transform;
-                        if (has_instances && i < instances.size())
+                        if (renderable->HasInstancing() && i < renderable->GetInstanceCount())
                         {
-                            transform = instances[i];
+                            transform = renderable->GetInstance(i, true);
                         }
                         else if (i == 0)
                         {
@@ -196,12 +197,12 @@ namespace spartan
                     }
                     else
                     {
-                        // Sync PhysX -> entity (simulated dynamic)
+                        // sync physx -> entity (simulated dynamic)
                         PxTransform pose = actor->getGlobalPose();
                         math::Matrix transform = math::Matrix::CreateTranslation(Vector3(pose.p.x, pose.p.y, pose.p.z)) * math::Matrix::CreateRotation(Quaternion(pose.q.x, pose.q.y, pose.q.z, pose.q.w));
-                        if (has_instances && renderable && i < instances.size())
+                        if (renderable->HasInstancing() && i < renderable->GetInstanceCount())
                         {
-                            renderable->SetInstance(static_cast<uint32_t>(i), transform);
+                            //renderable->SetInstance(static_cast<uint32_t>(i), transform); // implement if needed
                         }
                         else if (i == 0)
                         {
@@ -212,11 +213,11 @@ namespace spartan
                 }
                 else
                 {
-                    // Editor mode: Sync entity -> PhysX, reset velocities only for non-kinematics
+                    // editor mode: sync entity -> physx, reset velocities only for non-kinematics
                     math::Matrix transform;
-                    if (has_instances && i < instances.size())
+                    if (renderable->HasInstancing() && i < renderable->GetInstanceCount())
                     {
-                        transform = instances[i];
+                        transform = renderable->GetInstance(i, true);
                     }
                     else if (i == 0)
                     {
@@ -226,11 +227,13 @@ namespace spartan
                     {
                         continue;
                     }
+
                     PxTransform pose(
                         PxVec3(transform.GetTranslation().x, transform.GetTranslation().y, transform.GetTranslation().z),
                         PxQuat(transform.GetRotation().x, transform.GetRotation().y, transform.GetRotation().z, transform.GetRotation().w)
                     );
                     actor->setGlobalPose(pose);
+
                     if (dynamic && !m_is_kinematic)
                     {
                         dynamic->setLinearVelocity(PxVec3(0, 0, 0));
@@ -240,97 +243,42 @@ namespace spartan
             }
         }
 
-        // distance-based activation/deactivation
+        // distance-based activation/deactivation for static actors
         if (m_body_type != BodyType::Controller && m_is_static)
         {
             if (Camera* camera = World::GetCamera())
             {
                 const Vector3 camera_pos = camera->GetEntity()->GetPosition();
-                PxScene* scene           = static_cast<PxScene*>(PhysicsWorld::GetScene());
-
                 if (Renderable* renderable = GetEntity()->GetComponent<Renderable>())
                 {
-                    for (uint32_t i = 0; i < static_cast<uint32_t>(m_bodies.size()); i++)
+                    for (uint32_t i = 0; i < static_cast<uint32_t>(m_actors.size()); i++)
                     {
-                        if (PxRigidActor* actor = static_cast<PxRigidActor*>(m_bodies[i]))
-                        { 
-                            const BoundingBox& bounding_box = renderable->HasInstancing() ? renderable->GetBoundingBoxInstance(static_cast<uint32_t>(i)) : renderable->GetBoundingBox();
-                            const Vector3 closest_point     = bounding_box.GetClosestPoint(camera_pos);
-                            const float distance_to_camera  = Vector3::Distance(camera_pos, closest_point);
-                            if (distance_to_camera > distance_deactivate && actor->getScene())
+                        if (PxRigidActor* actor = static_cast<PxRigidActor*>(m_actors[i]))
+                        {
+                            Vector3 closest_point = Vector3::Zero;
+                            if (renderable->HasInstancing())
                             {
-                                scene->removeActor(*actor);
+                                closest_point = renderable->GetInstance(i, true).GetTranslation();
                             }
-                            else if (distance_to_camera <= distance_activate && !actor->getScene())
+                            else
                             {
-                                scene->addActor(*actor);
+                                closest_point = renderable->GetBoundingBox().GetClosestPoint(camera_pos);
+                            }
+
+                            const float distance_to_camera = Vector3::DistanceSquared(camera_pos, closest_point);
+                            if (distance_to_camera > distance_deactivate_squared)
+                            {
+                                PhysicsWorld::RemoveActor(actor);
+                            }
+                            else if (distance_to_camera <= distance_activate_squared)
+                            {
+                                PhysicsWorld::AddActor(actor);
                             }
                         }
+
                     }
                 }
             }
-        }
-
-        // handle water body buoyancy
-        if (m_body_type == BodyType::Water && Engine::IsFlagSet(EngineMode::Playing))
-        {
-            float water_density       = 1000.0f; // default water density (kg/m³)
-            PxScene* scene            = static_cast<PxScene*>(PhysicsWorld::GetScene());
-            PxRigidActor* water_actor = static_cast<PxRigidActor*>(m_bodies[0]);
-            PxShape* shape;
-            water_actor->getShapes(&shape, 1);
-            if (!shape)
-                return;
-
-            // perform overlap query
-            PxGeometryHolder geometry = shape->getGeometry();
-            PxTransform shape_pose = water_actor->getGlobalPose();
-            PxOverlapBufferN<10> hit_buffer; // 10 overlapping actors max
-            PxQueryFilterData filter_data;
-            filter_data.flags = PxQueryFlag::eDYNAMIC | PxQueryFlag::eSTATIC; // dynamic and static (controller)
-            
-            if (scene->overlap(geometry.any(), shape_pose, hit_buffer, filter_data))
-            {
-                for (PxU32 i = 0; i < hit_buffer.nbTouches; ++i)
-                {
-                    PxOverlapHit& hit = hit_buffer.touches[i];
-                    PxRigidActor* other_actor = hit.actor;
-                    if (!other_actor || other_actor == water_actor)
-                        continue;
-            
-                    Entity* other_entity = static_cast<Entity*>(other_actor->userData);
-                    if (!other_entity)
-                        continue;
-            
-                    Physics* other_physics = other_entity->GetComponent<Physics>();
-                    if (!other_physics)
-                        continue;
-            
-                    BodyType body_type = other_physics->GetBodyType();
-                    if (other_physics->IsStatic() && body_type != BodyType::Controller)
-                        continue;
-            
-                    float vertical_velocity             = other_physics->GetLinearVelocity().y;
-                    float mass                          = other_physics->GetMass();
-                    float delta_time                    = static_cast<float>(Timer::GetDeltaTimeSec());
-                    const float desired_upward_velocity = 1.2f;
-                    float velocity_error                = desired_upward_velocity - vertical_velocity;
-                    float force_to_apply                = velocity_error * mass / delta_time;
-                    const float max_force               = 500.0f;
-                    force_to_apply                      = clamp(force_to_apply, -max_force, max_force);
-                    Vector3 buoyancy_force(0.0f, force_to_apply, 0.0f);
-
-                    if (body_type == BodyType::Controller)
-                    {
-                        other_physics->m_velocity.y += (force_to_apply / mass) * delta_time;
-                    }
-                    else
-                    {
-                        other_physics->ApplyForce(buoyancy_force, PhysicsForce::Constant);
-                    }
-                }
-            }
-
         }
     }
 
@@ -459,7 +407,7 @@ namespace spartan
         m_mass = min(max(mass, 0.001f), 10000.0f);
     
         // update mass for all dynamic bodies
-        for (auto* body : m_bodies)
+        for (auto* body : m_actors)
         {
             if (body)
             { 
@@ -518,7 +466,7 @@ namespace spartan
         if (m_body_type == BodyType::Controller)
             return;
 
-        for (auto* body : m_bodies)
+        for (auto* body : m_actors)
         {
             if (PxRigidDynamic* dynamic = static_cast<PxRigidActor*>(body)->is<PxRigidDynamic>())
             {
@@ -540,10 +488,10 @@ namespace spartan
             return Vector3::Zero;
         }
         
-        if (m_bodies.empty())
+        if (m_actors.empty())
             return Vector3::Zero;
             
-        if (PxRigidDynamic* dynamic = static_cast<PxRigidActor*>(m_bodies[0])->is<PxRigidDynamic>())
+        if (PxRigidDynamic* dynamic = static_cast<PxRigidActor*>(m_actors[0])->is<PxRigidDynamic>())
         {
             PxVec3 velocity = dynamic->getLinearVelocity();
             return Vector3(velocity.x, velocity.y, velocity.z);
@@ -557,7 +505,7 @@ namespace spartan
         if (m_body_type == BodyType::Controller)
             return;
 
-        for (auto* body : m_bodies)
+        for (auto* body : m_actors)
         {
             if (PxRigidDynamic* dynamic = static_cast<PxRigidActor*>(body)->is<PxRigidDynamic>())
             {
@@ -575,7 +523,7 @@ namespace spartan
             return;
         }
 
-        for (auto* body : m_bodies)
+        for (auto* body : m_actors)
         {
             if (PxRigidDynamic* dynamic = static_cast<PxRigidActor*>(body)->is<PxRigidDynamic>())
             {
@@ -597,7 +545,7 @@ namespace spartan
             return;
     
         m_position_lock = lock;
-        for (auto* body : m_bodies)
+        for (auto* body : m_actors)
         {
             if (PxRigidDynamic* dynamic = static_cast<PxRigidActor*>(body)->is<PxRigidDynamic>())
             {
@@ -624,7 +572,7 @@ namespace spartan
             return;
     
         m_rotation_lock = lock;
-        for (auto* body : m_bodies)
+        for (auto* body : m_actors)
         {
             if (PxRigidDynamic* dynamic = static_cast<PxRigidActor*>(body)->is<PxRigidDynamic>())
             {
@@ -646,7 +594,7 @@ namespace spartan
             return;
     
         m_center_of_mass = center_of_mass;
-        for (auto* body : m_bodies)
+        for (auto* body : m_actors)
         {
             if (PxRigidDynamic* dynamic = static_cast<PxRigidActor*>(body)->is<PxRigidDynamic>())
             {
@@ -1003,17 +951,14 @@ namespace spartan
 
     void Physics::CreateBodies()
     {
-        PxPhysics* physics                    = static_cast<PxPhysics*>(PhysicsWorld::GetPhysics());
-        PxScene* scene                        = static_cast<PxScene*>(PhysicsWorld::GetScene());
-        Renderable* renderable                = GetEntity()->GetComponent<Renderable>();
-        const vector<math::Matrix>& instances = renderable ? renderable->GetInstances() : vector<math::Matrix>();
-        size_t instance_count                 = instances.empty() ? 1 : instances.size();
+        PxPhysics* physics      = static_cast<PxPhysics*>(PhysicsWorld::GetPhysics());
+        Renderable* renderable  = GetEntity()->GetComponent<Renderable>();
 
         // create bodies and shapes
-        m_bodies.resize(instance_count, nullptr);
-        for (size_t i = 0; i < instance_count; i++)
+        m_actors.resize(renderable->GetInstanceCount(), nullptr);
+        for (uint32_t i = 0; i < renderable->GetInstanceCount(); i++)
         {
-            math::Matrix transform = instances.empty() ? GetEntity()->GetMatrix() : instances[i];
+            math::Matrix transform = renderable->HasInstancing() ? renderable->GetInstance(i, true) : GetEntity()->GetMatrix();
             PxTransform pose(
                 PxVec3(transform.GetTranslation().x, transform.GetTranslation().y, transform.GetTranslation().z),
                 PxQuat(transform.GetRotation().x, transform.GetRotation().y, transform.GetRotation().z, transform.GetRotation().w)
@@ -1090,7 +1035,7 @@ namespace spartan
                     {
                         if (IsStatic() || IsKinematic())
                         {
-                            Vector3 scale = instance_count > 1 ? instances[i].GetScale() : Vector3::One;
+                            Vector3 scale = renderable->HasInstancing() ? renderable->GetInstance(i, false).GetScale() : Vector3::One;
                             PxMeshScale mesh_scale(PxVec3(scale.x, scale.y, scale.z)); // this is a runtime transform, cheap for statics but it won't be reflected for the internal baked shape (raycasts etc)
                             PxTriangleMeshGeometry geometry(static_cast<PxTriangleMesh*>(m_mesh), mesh_scale);
                             shape = physics->createShape(geometry, *material);
@@ -1103,36 +1048,21 @@ namespace spartan
                     }
                     break;
                 }
-                case BodyType::Water:
-                {
-                    Vector3 extents = renderable->GetBoundingBox().GetExtents();
-
-                    // controls the body overlap volume
-                    const float height_extent = 2.0f;
-                
-                    // build geometry that extends downward from the water surface
-                    PxBoxGeometry geometry(extents.x, height_extent * 0.5f, extents.z);
-                
-                    // offset the shape so its top aligns with the visual water surface
-                    PxTransform offset(PxVec3(0.0f, -height_extent * 0.5f, 0.0f));
-                
-                    // create shape and assign offset
-                    shape = physics->createShape(geometry, *material);
-                    shape->setLocalPose(offset);
-                    shape->setFlag(PxShapeFlag::eSIMULATION_SHAPE, false); // disable simulation
-                    shape->setFlag(PxShapeFlag::eTRIGGER_SHAPE, true);     // enable trigger
-                    break;
-                }
             }
+            
             if (shape)
             {
                 shape->setFlag(PxShapeFlag::eVISUALIZATION, true);
                 actor->attachShape(*shape);
             }
-            actor->userData = reinterpret_cast<void*>(GetEntity());
-            scene->addActor(*actor);
-        
-            m_bodies[i] = actor;
+
+            if (actor)
+            {
+                actor->userData = reinterpret_cast<void*>(GetEntity());
+                PhysicsWorld::AddActor(actor);
+            }
+
+            m_actors[i] = actor;
         }
     }
 }

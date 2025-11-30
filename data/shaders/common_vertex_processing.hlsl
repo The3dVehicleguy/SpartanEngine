@@ -29,61 +29,112 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 // vertex buffer input
 struct Vertex_PosUvNorTan
 {
-    float4 position           : POSITION;
-    float2 uv                 : TEXCOORD;
-    float3 normal             : NORMAL;
-    float3 tangent            : TANGENT;
-    matrix instance_transform : INSTANCE_TRANSFORM;
+    float4 position                : POSITION;
+    float2 uv                      : TEXCOORD;
+    float3 normal                  : NORMAL;
+    float3 tangent                 : TANGENT;
+    min16float instance_position_x : INSTANCE_POSITION_X;
+    min16float instance_position_y : INSTANCE_POSITION_Y;
+    min16float instance_position_z : INSTANCE_POSITION_Z;
+    uint instance_normal_oct       : INSTANCE_NORMAL_OCT;
+    uint instance_yaw              : INSTANCE_YAW;
+    uint instance_scale            : INSTANCE_SCALE;
 };
 
 // vertex buffer output
 struct gbuffer_vertex
 {
-    float3 position               : POS_WORLD;
-    float3 position_previous      : POS_WORLD_PREVIOUS;
-    float4 position_clip          : SV_POSITION;
-    float4 position_clip_current  : POS_CLIP;
-    float4 position_clip_previous : POS_CLIP_PREVIOUS;
-    float3 normal                 : NORMAL_WORLD;
-    float3 tangent                : TANGENT_WORLD;
-    float2 uv                     : TEXCOORD;
-    float height_percent          : HEIGHT_PERCENT;
-    uint instance_id              : INSTANCE_ID;
-}; 
+    float4 position          : SV_POSITION;
+    float4 position_previous : POS_CLIP_PREVIOUS;
+    float3 normal            : NORMAL_WORLD;
+    float3 tangent           : TANGENT_WORLD;
+    float4 uv_misc           : TEXCOORD;  // xy = uv, z = height_percent, w = instance_id - packed together to reduced the interpolators (shader registers) the gpu needs to track
+    float width_percent      : TEXCOORD2; // temp, will remove
+};
 
-// remap a value from one range to another
-float remap(float value, float inMin, float inMax, float outMin, float outMax)
+float4x4 compose_instance_transform(min16float instance_position_x, min16float instance_position_y, min16float instance_position_z, uint instance_normal_oct, uint instance_yaw, uint instance_scale)
 {
-    return outMin + (value - inMin) * (outMax - outMin) / (inMax - inMin);
+    // compose position
+    float3 instance_position = float3(instance_position_x, instance_position_y, instance_position_z);
+    
+    // check for identity
+    if (!any(instance_position) && instance_normal_oct == 0 && instance_yaw == 0 && instance_scale == 0)
+        return float4x4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+    
+    // compose octahedral normal
+    float x            = float(instance_normal_oct >> 8) / 255.0 * 2.0 - 1.0;
+    float y            = float(instance_normal_oct & 0xFF) / 255.0 * 2.0 - 1.0;
+    float3 n           = float3(x, y, 1.0 - abs(x) - abs(y));
+    float mask         = step(0.0, n.z);
+    float2 adjusted_xy = (float2(1.0, 1.0) - abs(n.yx)) * sign(n.xy);
+    n.xy               = mask * n.xy + (1.0 - mask) * adjusted_xy;
+    float3 normal      = normalize(n);
+    
+    // compose yaw and scale
+    float yaw   = float(instance_yaw) / 255.0 * 6.28318530718; // pi_2
+    float scale = exp2(lerp(-6.643856, 6.643856, float(instance_scale) / 255.0)); // log2(0.01) to log2(100)
+    
+    // compose quaternion
+    float3 up           = float3(0, 1, 0);
+    float up_dot_normal = dot(up, normal);
+    float4 quat;
+    if (abs(up_dot_normal) >= 0.999999)
+    {
+        quat = up_dot_normal > 0 ? float4(0, 0, 0, 1) : float4(1, 0, 0, 0);
+    }
+    else
+    {
+        float s = fast_sqrt(2.0 + 2.0 * up_dot_normal);
+        quat    = float4(cross(up, normal) / s, s * 0.5);
+    }
+    float cy        = cos(yaw * 0.5);
+    float sy        = sin(yaw * 0.5);
+    float4 quat_yaw = float4(0, sy, 0, cy);
+    float4 q        = float4(
+        quat.w * quat_yaw.x + quat.x * quat_yaw.w + quat.y * quat_yaw.z - quat.z * quat_yaw.y,
+        quat.w * quat_yaw.y - quat.x * quat_yaw.z + quat.y * quat_yaw.w + quat.z * quat_yaw.x,
+        quat.w * quat_yaw.z + quat.x * quat_yaw.y - quat.y * quat_yaw.x + quat.z * quat_yaw.w,
+        quat.w * quat_yaw.w - quat.x * quat_yaw.x - quat.y * quat_yaw.y - quat.z * quat_yaw.z
+    );
+    
+    // compose rotation matrix
+    float xx = q.x * q.x;
+    float xy = q.x * q.y;
+    float xz = q.x * q.z;
+    float xw = q.x * q.w;
+    float yy = q.y * q.y;
+    float yz = q.y * q.z;
+    float yw = q.y * q.w;
+    float zz = q.z * q.z;
+    float zw = q.z * q.w;
+    float3x3 rotation = float3x3(
+        1 - 2 * (yy + zz), 2 * (xy - zw), 2 * (xz + yw),
+        2 * (xy + zw), 1 - 2 * (xx + zz), 2 * (yz - xw),
+        2 * (xz - yw), 2 * (yz + xw), 1 - 2 * (xx + yy)
+    );
+    
+    // compose final transform
+    return float4x4(
+        float4(rotation._11 * scale, rotation._12 * scale, rotation._13 * scale, 0),
+        float4(rotation._21 * scale, rotation._22 * scale, rotation._23 * scale, 0),
+        float4(rotation._31 * scale, rotation._32 * scale, rotation._33 * scale, 0),
+        float4(instance_position, 1)
+    );
 }
 
-static float3 extract_position(matrix transform)
+float3 extract_position(matrix transform)
 {
     return float3(transform._31, transform._32, transform._33);
 }
 
-static bool is_identity_matrix(matrix m)
-{
-    const float epsilon = 1e-5f;
-
-    return
-        all(abs(m[0] - float4(1, 0, 0, 0)) < epsilon) &&
-        all(abs(m[1] - float4(0, 1, 0, 0)) < epsilon) &&
-        all(abs(m[2] - float4(0, 0, 1, 0)) < epsilon) &&
-        all(abs(m[3] - float4(0, 0, 0, 1)) < epsilon);
-}
-
-// create a 3x3 rotation matrix using Rodrigues' rotation formula
-static float3x3 rotation_matrix(float3 axis, float angle)
+float3x3 rotation_matrix(float3 axis, float angle)
 {
     float c = cos(angle);
     float s = sin(angle);
     float t = 1.0f - c;
-    
-    // normalize the axis to ensure proper rotation
+
     axis = normalize(axis);
-    
-    // rodrigues' rotation formula
+
     return float3x3(
         t * axis.x * axis.x + c,
         t * axis.x * axis.y - s * axis.z,
@@ -101,91 +152,6 @@ static float3x3 rotation_matrix(float3 axis, float angle)
 
 struct vertex_processing
 {
-    struct water
-    {
-        static void compute_wave_offset(inout float3 position_vertex, inout float3 dp_dx, inout float3 dp_dz, float time, float amplitude, float wavelength, float frequency, float fade_factor)
-        {
-            const float2 direction = normalize(buffer_frame.wind.xz);
-            
-            // gerstner wave parameters
-            float k = PI2 / wavelength; // wave number (2π / wavelength)
-            float w = PI2 * frequency;  // angular frequency (2π * frequency in hz)
-            
-            // phase calculation
-            float phase = dot(direction, position_vertex.xz) * k + time * w;
-            float c     = cos(phase);
-            float s     = sin(phase);
-
-            // position offset
-            position_vertex.x += amplitude * direction.x * c * fade_factor;
-            position_vertex.z += amplitude * direction.y * c * fade_factor;
-            position_vertex.y += amplitude * s * fade_factor;
-            
-            // accumulate wave direction
-            {
-                float kx = k * direction.x;
-                float kz = k * direction.y;
-                float A  = amplitude;
-
-                // tangent
-                dp_dx += float3(-A * direction.x * kx * s,  // dx/dx
-                                 A * kx * c,                // dy/dx
-                                -A * direction.y * kx * s); // dz/dx
-            
-                // bitangent
-                dp_dz += float3(-A * direction.x * kz * s,  // dx/dz
-                                 A * kz * c,                // dy/dz
-                                -A * direction.y * kz * s); // dz/dz
-            }
-        }
-        
-        static void apply_wave(inout float3 position, inout float3 normal, inout float3 tangent, float time, float fade_factor)
-        {
-            // small waves: high-frequency small ripples (SI units)
-            const float amplitude  = 0.1f;
-            const float wavelength = 1.0f;
-            const float frequency  = 1.0f; 
-            
-            float3 dp_dx = tangent;
-            float3 dp_dz = normalize(cross(normal, tangent)); // bitangent
-        
-            // update position
-            compute_wave_offset(position, dp_dx, dp_dz, time, amplitude, wavelength, frequency, fade_factor);
-        
-            // update normal
-            tangent          = normalize(dp_dx);
-            float3 bitangent = normalize(dp_dz);
-            normal           = normalize(cross(bitangent, tangent));
-        }
-    };
-
-    static void process_local_space(Surface surface, inout Vertex_PosUvNorTan input, inout gbuffer_vertex vertex, float width_percent, uint instance_id)
-    {
-        if (!surface.is_grass_blade())
-            return;
-    
-        const float3 up    = float3(0, 1, 0);
-        const float3 right = float3(1, 0, 0);
-    
-        // replace flat normals with curved ones
-        const float total_curvature = 60.0f * DEG_TO_RAD;
-        float t                     = (width_percent - 0.5f) * 2.0f;
-        float harsh_factor          = t * t * t;
-        float curve_angle           = harsh_factor * (total_curvature / 2.0f);
-        float3x3 curvature_rotation = rotation_matrix(up, curve_angle);
-        input.normal                = mul(curvature_rotation, input.normal);
-        input.tangent               = mul(curvature_rotation, input.tangent);
-    
-        // gravity + wind bend
-        float random_lean      = hash(instance_id);
-        float gravity_angle    = random_lean * vertex.height_percent;
-        float wind_angle       = noise_perlin((float)buffer_frame.time) * 0.2f;
-        float3x3 bend_rotation = rotation_matrix(right, gravity_angle + wind_angle);
-        input.position.xyz     = mul(bend_rotation, input.position.xyz);
-        input.normal           = mul(bend_rotation, input.normal);
-        input.tangent          = mul(bend_rotation, input.tangent);
-    }
- 
     static void process_world_space(Surface surface, inout float3 position_world, inout gbuffer_vertex vertex, float3 position_local, float4x4 transform, uint instance_id, float time_offset)
     {
         float time                        = (float)buffer_frame.time + time_offset;
@@ -197,98 +163,93 @@ struct vertex_processing
         float3 instance_up                = normalize(transform[1].xyz);
         
         // wind simulation
-        float distance_to_camera = fast_length(position_world - buffer_frame.camera_position);
-        if (surface.is_grass_blade() && distance_to_camera <= 300.0f)
+        if (surface.is_grass_blade() || surface.is_flower())
         {
-            const float wind_direction_scale      = 0.05f; // scale for wind direction noise (larger scale = broader patterns)
-            const float wind_direction_variation  = PI / 4.0f * (0.5f + base_wind_magnitude / 2.0f); // scale variation width (e.g., wider swings at high mag)
-            const float wind_strength_scale       = 0.25f; // scale for wind strength noise
-            const float wind_strength_amplitude   = 2.0f;  // amplifies the wind strength noise
-            const float min_wind_lean             = 0.25f; // minimum grass lean angle
-            const float max_wind_lean             = 1.0f;  // maximum grass lean angle
-            
-            // global wind strength modulation (simulates gusts and lulls)
-            float global_wind_strength = noise_perlin(float2(time * scaled_gust_scale, 0.0f));
-            global_wind_strength       = remap(global_wind_strength, -1.0f, 1.0f, 0.5f, 1.5f); // varies between 0.5x and 1.5x strength
-            
-            // base wind direction from buffer, with noise variation
-            float base_wind_angle    = atan2(base_wind_dir.z, base_wind_dir.x);
-            float2 noise_pos_dir     = position_world.xz * wind_direction_scale + float2(time * scaled_direction_time_scale, 0.0f);
-            float wind_direction_var = noise_perlin(noise_pos_dir);
-            float wind_direction     = base_wind_angle + remap(wind_direction_var, -1.0f, 1.0f, -wind_direction_variation, wind_direction_variation);
-            
-            // 2D noise for wind strength
-            float2 noise_pos_strength = position_world.xz * wind_strength_scale + float2(time * base_wind_magnitude, 0.0f);
-            float wind_strength_noise = noise_perlin(noise_pos_strength) * wind_strength_amplitude * global_wind_strength;
-            
-            // calculate wind lean angle with cubic easing for natural bending
-            float wind_lean_angle = remap(wind_strength_noise, -1.0f, 1.0f, min_wind_lean, max_wind_lean);
-            wind_lean_angle       = (wind_lean_angle * wind_lean_angle * wind_lean_angle); // cubic ease-in
-            wind_lean_angle       = clamp(wind_lean_angle, 0.0f, PI); // cap at π to avoid bending below ground
-            
-            // wind direction vector and rotation axis
-            float3 wind_dir      = float3(cos(wind_direction), 0, sin(wind_direction));
-            float3 rotation_axis = normalize(cross(instance_up, wind_dir));
-            
-            // apply wind bend based on height
-            float total_height = 1.0f; // this can be passed from the cpu, but it's currently not needed
-            float curve_angle  = (wind_lean_angle / total_height) * vertex.height_percent;
-            
-            // rotate position, normal, and tangent around the axis
-            float3x3 rotation    = rotation_matrix(rotation_axis, curve_angle);
-            float3 base_position = position_world - position_local;
-            float3 local_pos     = position_world - base_position;
-            local_pos            = mul(rotation, local_pos);
-            position_world       = base_position + local_pos;
-            vertex.normal        = mul(rotation, vertex.normal);
-            vertex.tangent       = mul(rotation, vertex.tangent);
+            float time         = (float) buffer_frame.time + time_offset;
+            float3 wind        = buffer_frame.wind;
+            float3 wind_dir    = normalize(wind + float3(1e-6f, 0.0f, 1e-6f));
+            float wind_mag     = length(wind);
+
+            // base params
+            const float base_scale = 0.025f;                   // broad patterns
+            const float time_scale = 0.1f * (1.0f + wind_mag); // speed up with mag
+            const float sway_amp   = wind_mag * 3.0f;          // stronger bends at high wind
+
+            // layered noise for sway (primary broad + secondary gust)
+            float2 uv   = position_world.xz * base_scale + wind_dir.xz * time * time_scale;
+            float sway  = noise_perlin(uv) * 0.7f;                                           // broad layer
+            sway       += noise_perlin(uv * 2.0f + float2(time * 0.5f, 0.0f)) * 0.3f;        // gust layer
+            sway        = sway * sway_amp * (vertex.uv_misc.z / GetMaterial().local_height); // height-based, remap to 0-1
+
+            // bend dir with slight noise variation
+            float dir_var   = noise_perlin(position_world.xz * 0.01f + time * 0.05f) * (PI / 6.0f);
+            float3 bend_dir = normalize(wind_dir + float3(sin(dir_var), 0.0f, cos(dir_var)));
+
+            // rotate around axis
+            float3 axis  = normalize(cross(instance_up, bend_dir));
+            float angle  = sway * (60.0f * DEG_TO_RAD);
+            float3x3 rot = rotation_matrix(axis, angle);
+
+             // apply to pos/normal/tangent
+            float3 base_pos = position_world - position_local;
+            position_world  = base_pos + mul(rot, position_world - base_pos);
+            vertex.normal   = mul(rot, vertex.normal);
+            vertex.tangent  = mul(rot, vertex.tangent);
         }
-        
-        if (surface.has_wind_animation() && !surface.is_grass_blade()) // grass has its own wind (now unified via buffer)
+        else if (surface.has_wind_animation()) // tree branch/leaf wind sway
         {
-            const float sway_extent       = 0.2f; // maximum sway amplitude
-            const float noise_scale       = 0.1f; // scale of low-frequency noise
-            const float flutter_intensity = 0.1f; // intensity of fluttering
-        
-            // base sinusoidal sway
-            float phase_offset = float(instance_id) * 0.25f * PI; // unique phase per instance
-            float base_wave    = sin(time * base_wind_magnitude + phase_offset);
-        
-            // add low-frequency perlin noise for smooth directional variation
-            float low_freq_noise        = noise_perlin(time * noise_scale * (1.0f + base_wind_magnitude / 2.0f) + instance_id * 0.1f);
-            float directional_variation = lerp(-0.5f, 0.5f, low_freq_noise); // smooth variation
-        
-            float3 perp_dir                = normalize(cross(base_wind_dir, instance_up));
-            float3 adjusted_wind_direction = normalize(base_wind_dir + directional_variation * perp_dir);
-        
-            // add high-frequency flutter (localized and rapid movement)
-            float flutter = sin(position_world.x * 10.0f + time * (5.0f * (1.0f + base_wind_magnitude))) * flutter_intensity;
-        
-            // combine all factors for sway
-            float combined_wave = base_wave + flutter;
-            float3 sway_offset  = adjusted_wind_direction * combined_wave * sway_extent * vertex.height_percent * base_wind_magnitude;
-        
-            // apply the calculated sway to the vertex
-            position_world += sway_offset;
-        }
+            const float horizontal_amplitude = 0.15f; // max horizontal sway
+            const float vertical_amplitude   = 0.1f;  // max vertical bob
+            const float sway_frequency       = 1.5f;  // base frequency for slow branch sway
+            const float bob_frequency        = 3.0f;  // faster frequency for leaf-like up-down flutter
+            const float noise_scale          = 0.08f; // low-frequency noise for gusts/lulls
+            const float flutter_variation    = 0.5f;  // subtle per-vertex flutter intensity
+
+            float time          = (float)buffer_frame.time + time_offset;
+            float height_factor = vertex.uv_misc.z; // 0 at base (trunk-attached), 1 at tip (more sway)
+
+            // unique phase per instance/vertex for natural variation
+            float instance_phase = float(instance_id) * 0.3f;
+            float vertex_phase   = position_world.x * 0.05f + position_world.z * 0.05f; // spatial offset
+
+            // horizontal sway: Wind-driven, sine-based bending in XZ plane
+            float wind_phase      = time * sway_frequency + instance_phase;
+            float horizontal_wave = sin(wind_phase + vertex_phase) * 0.5f; // base sine (range -0.5 to 0.5)
     
-        if (surface.has_wind_animation() || surface.is_grass_blade())
-        {
-            // This appears to be camera-based bending, not wind-related (e.g., simulating displacement from player/camera proximity)
-            // Kept as-is since it's separate from wind simulation
-            float distance                    = length(float2(position_world.x - buffer_frame.camera_position.x, position_world.z - buffer_frame.camera_position.z));
-            float bending_strength            = saturate(1.0f / (distance * distance + 1.0f));
-            float2 direction_away_from_player = normalize(position_world.xz - buffer_frame.camera_position.xz);
-            float3 bending_offset             = float3(direction_away_from_player * bending_strength * vertex.height_percent, bending_strength * vertex.height_percent * 0.5f);
-        
-            // adjust position: apply both horizontal and vertical bending
-            position_world.xz += bending_offset.xz * 0.5f; // horizontal effect
-            position_world.y  += bending_offset.y;         // vertical effect
+            // modulate with low-freq Perlin for gusts (tied to wind magnitude)
+            float gust_noise = noise_perlin(float2(time * noise_scale, float(instance_id) * 0.1f));
+            horizontal_wave *= (0.7f + 0.3f * gust_noise) * base_wind_magnitude; // varies 0.7x-1.0x base, scaled by wind
+
+            // apply horizontal displacement (projected onto world XZ, scaled by height for attachment)
+            float3 horizontal_dir     = float3(base_wind_dir.x, 0.0f, base_wind_dir.z); // ignore Y for pure horizontal
+            float3 horizontal_offset  = horizontal_dir * horizontal_wave * horizontal_amplitude * height_factor;
+            position_world           += horizontal_offset;
+
+            // vertical oscillation: independent bob, with subtle wind influence for realism
+            float bob_phase     = time * bob_frequency + instance_phase * 1.2f + vertex_phase * 2.0f; // slightly offset phase
+            float vertical_wave = sin(bob_phase) * 0.6f; // asymmetric sine for more "drop" than "rise"
+
+            // add high-freq flutter noise (localized, rapid leaf movement)
+            float flutter_noise = noise_perlin(float2(position_world.xz * 5.0f + time * 2.0f));
+            vertical_wave += flutter_noise * flutter_variation;
+
+            // tie subtle wind influence to vertical (e.g., stronger wind = more pronounced bob)
+            vertical_wave *= (1.0f + 0.2f * base_wind_magnitude * abs(horizontal_wave)); // amplify based on horizontal intensity
+
+            // apply vertical displacement (pure Y, scaled by height but less aggressively for grounded feel)
+            float3 vertical_offset  = float3(0.0f, vertical_wave * vertical_amplitude * height_factor * 0.8f, 0.0f);
+            position_world         += vertical_offset;
+            float bend_amount       = length(horizontal_offset + vertical_offset) * 0.5f * height_factor;
+            float3 bend_dir         = normalize(horizontal_offset + vertical_offset * 0.5f); // bias toward horizontal
+            vertex.normal          += bend_dir * bend_amount;
+            vertex.normal           = normalize(vertex.normal);
+            vertex.tangent         += bend_dir * bend_amount * 0.5f;
+            vertex.tangent          = normalize(vertex.tangent);
         }
     }
 };
 
-gbuffer_vertex transform_to_world_space(Vertex_PosUvNorTan input, uint instance_id, matrix transform)
+gbuffer_vertex transform_to_world_space(Vertex_PosUvNorTan input, uint instance_id, matrix transform, inout float3 position_world, inout float3 position_world_previous)
 {
     MaterialParameters material = GetMaterial();
     Surface surface;
@@ -296,166 +257,45 @@ gbuffer_vertex transform_to_world_space(Vertex_PosUvNorTan input, uint instance_
 
     // start building the vertex
     gbuffer_vertex vertex;
-    vertex.instance_id = instance_id;
+    vertex.uv_misc.w         = instance_id;
+    float2 uv = float2(input.uv.x * material.tiling.x + material.offset.x, input.uv.y * material.tiling.y + material.offset.y);
+    // apply inversion (mirror along axis)
+    uv.x = material.invert_uv.x > 0.5f ? (1.0f - frac(uv.x)) + floor(uv.x) : uv.x;
+    uv.y = material.invert_uv.y > 0.5f ? (1.0f - frac(uv.y)) + floor(uv.y) : uv.y;
+    vertex.uv_misc.xy        = uv;
+    vertex.position          = 0.0f; // set to silence validation errors (in case it's never set later)
+    vertex.position_previous = 0.0f; // set to silence validation errors (in case it's never set later)
     
     // compute width and height percent, they represent the position of the vertex relative to the grass blade
-    float3 position_transform = extract_position(transform); // bottom-left of the grass blade
-    float width_percent       = (input.position.xyz.x) / material.local_width;
-    vertex.height_percent     = (input.position.xyz.y - position_transform.y) / material.local_height;
-
-    // vertex processing - local space
-    vertex_processing::process_local_space(surface, input, vertex, width_percent, instance_id);
-
-    // compute world transform
-    matrix transform_instance = input.instance_transform;                // identity for non-instanced
-    bool is_instanced         = !is_identity_matrix(transform_instance); // in case an instance transform is identity, this will still work
-    transform                 = mul(transform, transform_instance);
-    matrix full               = pass_get_transform_previous();
-    matrix<float, 3, 3> temp  = (float3x3)full;                          // clip the last row as it has encoded data in the first two elements
-    matrix transform_previous = matrix(                                  // manually construct a matrix that can be multiplied with another matrix
-        temp._m00, temp._m01, temp._m02, 0.0f,
-        temp._m10, temp._m11, temp._m12, 0.0f,
-        temp._m20, temp._m21, temp._m22, 0.0f,
-        0.0f,      0.0f,      0.0f,      1.0f
-    );
-    transform_previous = is_instanced ? mul(transform_previous, transform_instance) : full;
-
+    float3 position_transform = extract_position(transform); // bottom of the grass blade
+    float width_percent       = saturate((input.position.x + material.local_width * 0.5f) / material.local_width);
+    float height_percent      = saturate(input.position.y / material.local_height);
+    vertex.uv_misc.z          = height_percent;
+    vertex.width_percent      = width_percent;
+    
     // transform to world space
-    vertex.position          = mul(input.position, transform).xyz;
-    vertex.position_previous = mul(input.position, transform_previous).xyz;
-    vertex.normal            = normalize(mul(input.normal, (float3x3)transform));
-    vertex.tangent           = normalize(mul(input.tangent, (float3x3)transform));
+    matrix instance           = compose_instance_transform(input.instance_position_x, input.instance_position_y, input.instance_position_z, input.instance_normal_oct, input.instance_yaw, input.instance_scale);
+    transform                 = mul(instance, transform);
+    matrix transform_previous = mul(instance, pass_get_transform_previous());
+    float3 position           = mul(input.position, transform).xyz;
+    float3 position_previous  = mul(input.position, transform_previous).xyz;
+    vertex.normal             = normalize(mul(input.normal, (float3x3)transform));
+    vertex.tangent            = normalize(mul(input.tangent, (float3x3)transform));
 
-    // compute (world-space) uv
-    float3 abs_normal = abs(vertex.normal); // absolute normal for weights
-    float3 weights    = abs_normal / (abs_normal.x + abs_normal.y + abs_normal.z + FLT_MIN); // normalize weights
-    float2 uv_xy      = float2(-vertex.position.x, vertex.position.y) / material.tiling + material.offset;
-    float2 uv_xz      = float2(-vertex.position.x, vertex.position.z) / material.tiling + material.offset;
-    float2 uv_yz      = float2(-vertex.position.y, vertex.position.z) / material.tiling + material.offset;
-    float2 world_uv   = uv_xy * weights.z + uv_xz * weights.y + uv_yz * weights.x;
-    float2 mesh_uv    = float2(input.uv.x * material.tiling.x + material.offset.x, input.uv.y * material.tiling.y + material.offset.y);
-    vertex.uv         = lerp(mesh_uv, world_uv, material.world_space_uv);
+    // process in world space
+    vertex_processing::process_world_space(surface, position, vertex, input.position.xyz, transform, instance_id, 0.0f);
+    vertex_processing::process_world_space(surface, position_previous, vertex, input.position.xyz, transform_previous, instance_id, -buffer_frame.delta_time);
 
-    // vertex processing - world space
-    vertex_processing::process_world_space(surface, vertex.position, vertex, input.position.xyz, transform, instance_id, 0.0f);
-    vertex_processing::process_world_space(surface, vertex.position_previous, vertex, input.position.xyz, transform_previous, instance_id, -buffer_frame.delta_time);
-
-    // set to silence validation errors (in case these are never set later)
-    vertex.position_clip          = 0.0f;
-    vertex.position_clip_current  = 0.0f;
-    vertex.position_clip_previous = 0.0f;
-    
+    // out and return
+    position_world          = position;
+    position_world_previous = position_previous;
     return vertex;
 }
 
-gbuffer_vertex transform_to_clip_space(gbuffer_vertex vertex)
+gbuffer_vertex transform_to_clip_space(gbuffer_vertex vertex, float3 position, float3 position_previous)
 {
-    vertex.position_clip          = mul(float4(vertex.position, 1.0f), buffer_frame.view_projection);
-    vertex.position_clip_current  = vertex.position_clip;
-    vertex.position_clip_previous = mul(float4(vertex.position_previous, 1.0f), buffer_frame.view_projection_previous);
-
+    vertex.position          = mul(float4(position, 1.0f), buffer_frame.view_projection);
+    vertex.position_previous = mul(float4(position_previous, 1.0f), buffer_frame.view_projection_previous);
+    
     return vertex;
-}
-
-// tessellation
-
-#define MAX_POINTS 3
-#define TESS_FACTOR 64
-#define TESS_DISTANCE 32.0f
-#define TESS_DISTANCE_SQUARED (TESS_DISTANCE * TESS_DISTANCE)
-
-// hull shader constant data
-struct HsConstantDataOutput
-{
-    float edges[3] : SV_TessFactor;       // edge tessellation factors
-    float inside   : SV_InsideTessFactor; // inside tessellation factor
-};
-
-// hull shader (control point phase) - pass-through
-[domain("tri")]
-[partitioning("fractional_odd")]
-[outputtopology("triangle_cw")]
-[patchconstantfunc("patch_constant_function")]
-[outputcontrolpoints(MAX_POINTS)]
-[maxtessfactor(TESS_FACTOR)]
-gbuffer_vertex main_hs(InputPatch<gbuffer_vertex, MAX_POINTS> input_patch, uint cp_id : SV_OutputControlPointID)
-{
-    return input_patch[cp_id]; // pass through unchanged
-}
-
-// hull shader (patch constant function) - dynamic tessellation
-HsConstantDataOutput patch_constant_function(InputPatch<gbuffer_vertex, MAX_POINTS> input_patch, uint patch_id : SV_PrimitiveID)
-{
-    HsConstantDataOutput output;
-    
-    // calculate distance from camera to triangle center
-    float3 avg_pos         = (input_patch[0].position + input_patch[1].position + input_patch[2].position) / 3.0f;
-    float3 to_camera       = avg_pos - buffer_frame.camera_position;
-    float distance_squared = dot(to_camera, to_camera);
-    float tess_factor      = (distance_squared <= TESS_DISTANCE_SQUARED) ? TESS_FACTOR : 1.0f;
-
-    // set tessellation factors
-    output.edges[0] = tess_factor;
-    output.edges[1] = tess_factor;
-    output.edges[2] = tess_factor;
-    output.inside   = tess_factor;
-
-    return output;
-}
-
-// domain shader
-[domain("tri")]
-gbuffer_vertex main_ds(HsConstantDataOutput input, float3 bary_coords : SV_DomainLocation, const OutputPatch<gbuffer_vertex, 3> patch)
-{
-    gbuffer_vertex vertex;
-
-    // interpolate vertex attributes
-    vertex.position          = patch[0].position          * bary_coords.x + patch[1].position          * bary_coords.y + patch[2].position          * bary_coords.z;
-    vertex.position_previous = patch[0].position_previous * bary_coords.x + patch[1].position_previous * bary_coords.y + patch[2].position_previous * bary_coords.z;
-    vertex.normal            = normalize(patch[0].normal  * bary_coords.x + patch[1].normal            * bary_coords.y + patch[2].normal            * bary_coords.z);
-    vertex.tangent           = normalize(patch[0].tangent * bary_coords.x + patch[1].tangent           * bary_coords.y + patch[2].tangent           * bary_coords.z);
-    vertex.uv                = patch[0].uv                * bary_coords.x + patch[1].uv                * bary_coords.y + patch[2].uv                * bary_coords.z;
-    vertex.height_percent    = patch[0].height_percent    * bary_coords.x + patch[1].height_percent    * bary_coords.y + patch[2].height_percent    * bary_coords.z; // pass through to avoid the compile optimizing out
-    
-    // calculate fade factor based on actual distance from camera
-    float3 vec_to_vertex      = vertex.position.xyz - buffer_frame.camera_position;
-    float distance_from_cam   = length(vec_to_vertex);
-    const float fade_distance = 4.0f; // distance from the end at which tessellation starts to fade to 0
-    float fade_factor         = saturate((TESS_DISTANCE - distance_from_cam) / fade_distance);
-
-    // displace
-    MaterialParameters material = GetMaterial(); Surface surface; surface.flags = material.flags;
-    bool tessellated            = input.edges[0] > 1.0f || input.edges[1] > 1.0f || input.edges[2] > 1.0f || input.inside > 1.0f;
-    if (tessellated)
-    {
-        if (surface.has_texture_height())
-        {
-            float height              = GET_TEXTURE(material_texture_index_packed).SampleLevel(GET_SAMPLER(sampler_bilinear_wrap), vertex.uv, 0.0f).a * 0.04f;
-            float3 displacement       = vertex.normal * height * material.height * fade_factor;
-            vertex.position          += displacement;
-            vertex.position_previous += displacement;
-        }
-
-        // for the terrain, add some perlin noise to make it look less flat
-        if (surface.is_terrain())
-        {
-            float height              = noise_perlin(vertex.position.xz * 8.0f) * 0.1f;
-            float3 displacement       = vertex.normal * height * fade_factor;
-            vertex.position          += displacement;
-            vertex.position_previous += displacement;
-        }
-    }
-
-    // for the water, apply some wave patterns
-    if (surface.is_water())
-    {
-        float time          = (float)buffer_frame.time;
-        float time_previous = time - (float)buffer_frame.delta_time;
-        
-        float3 normal, tangent;
-        vertex_processing::water::apply_wave(vertex.position_previous, normal,        tangent,        time_previous, fade_factor);
-        vertex_processing::water::apply_wave(vertex.position,          vertex.normal, vertex.tangent, time,          fade_factor);
-    }
-
-    return transform_to_clip_space(vertex);
 }

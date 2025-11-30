@@ -1,4 +1,4 @@
-#/*
+/*
 Copyright(c) 2015-2025 Panos Karabelas
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -33,6 +33,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Rendering/Material.h"
 #include "../RHI/RHI_VendorTechnology.h"
 #include "../RHI/RHI_RasterizerState.h"
+#include "../RHI/RHI_Device.h"
 SP_WARNINGS_OFF
 #include "bend_sss_cpu.h"
 SP_WARNINGS_ON
@@ -47,10 +48,14 @@ namespace spartan
 {
     array<Renderer_DrawCall, renderer_max_draw_calls> Renderer::m_draw_calls;
     uint32_t Renderer::m_draw_call_count;
+    array<Renderer_DrawCall, renderer_max_draw_calls> Renderer::m_draw_calls_prepass;
+    uint32_t Renderer::m_draw_calls_prepass_count;
+    unique_ptr<RHI_Buffer> Renderer::m_std_reflections;
 
     void Renderer::SetStandardResources(RHI_CommandList* cmd_list)
     {
         cmd_list->SetConstantBuffer(Renderer_BindingsCb::frame, GetBuffer(Renderer_Buffer::ConstantFrame));
+        cmd_list->SetTexture(Renderer_BindingsSrv::tex_perlin, GetStandardTexture(Renderer_StandardTexture::Noise_perlin));
     }
 
     void Renderer::ProduceFrame(RHI_CommandList* cmd_list_graphics_present, RHI_CommandList* cmd_list_compute)
@@ -106,6 +111,7 @@ namespace spartan
                 Pass_ShadowMaps(cmd_list_graphics_present);
                 Pass_ScreenSpaceShadows(cmd_list_graphics_present);
                 Pass_ScreenSpaceAmbientOcclusion(cmd_list_graphics_present);
+                Pass_RayTracedReflections(cmd_list_graphics_present);
                 Pass_Light(cmd_list_graphics_present, is_transparent);             // compute diffuse and specular buffers
                 Pass_Light_Composition(cmd_list_graphics_present, is_transparent); // compose all light (diffuse, specular, etc).
                 cmd_list_graphics_present->Blit(GetRenderTarget(Renderer_RenderTarget::frame_render), GetRenderTarget(Renderer_RenderTarget::frame_render_opaque), false);
@@ -232,7 +238,7 @@ namespace spartan
                             continue;
 
                         // todo: this needs to be recalculate only when the light or the renderable moves, not every frame
-                        if (!light->IsInViewFrustum(renderable, array_index, draw_call.instance_group_index))
+                        if (!light->IsInViewFrustum(renderable, array_index))
                             continue;
 
                         // pixel shader
@@ -265,16 +271,18 @@ namespace spartan
                             cmd_list->SetBufferVertex(renderable->GetVertexBuffer(), renderable->GetInstanceBuffer());
                             cmd_list->SetBufferIndex(renderable->GetIndexBuffer());
 
-                            // bias the lod index to improve performance (for non-directional lights)
-                            const uint32_t lod_bias = light->GetLightType() == LightType::Directional ? 0 : 1;
-                            uint32_t lod_index      = clamp<uint32_t>(draw_call.lod_index + lod_bias, 0, renderable->GetLodCount() - 1);
+                            // compute lod index
+                            bool close_to_shadow      = renderable->GetDistanceSquared() < 100.0f * 100.0f;                                   // anything within 100 meters of the shadow caster
+                            uint32_t lod_index_bias   = light->GetLightType() == LightType::Directional ? 1 : 0;                              // bias for directional lights
+                            uint32_t lod_index_shadow = clamp(renderable->GetLodIndex() + lod_index_bias, 0u, renderable->GetLodCount() - 1); // lod index biased towards lower quality lod
+                            uint32_t lod_index        = close_to_shadow ? draw_call.lod_index : lod_index_shadow;                             // use normal lod if close to shadow caster, otherwise use light specific lod
 
                             cmd_list->DrawIndexed(
                                 renderable->GetIndexCount(lod_index),
                                 renderable->GetIndexOffset(lod_index),
                                 renderable->GetVertexOffset(lod_index),
-                                renderable->HasInstancing() ? draw_call.instance_index : 0,
-                                renderable->HasInstancing() ? draw_call.instance_count : 1
+                                draw_call.instance_index,
+                                draw_call.instance_count
                             );
                         }
                     }
@@ -286,7 +294,7 @@ namespace spartan
 
     void Renderer::Pass_Occlusion(RHI_CommandList* cmd_list)
     {
-        // determines visibility without GPU stalls, full GPU-driven rendering, or pop-in
+        // determines visibility without GPU stalls
         // major occluders are rendered to a depth buffer, then a Hi-Z mip chain enables fast coarse AABB tests
         // objects failing Hi-Z but recently visible get precise occlusion queries, with results read next frame
         // recently visible objects are drawn until confirmed occluded, avoiding sudden disappearances
@@ -305,9 +313,9 @@ namespace spartan
         static unordered_map<uint64_t, VisibilityState> visibility_states;
     
         // check pending queries from previous frame and update visibility
-        for (uint32_t i = 0; i < m_draw_call_count; i++)
+        for (uint32_t i = 0; i < m_draw_calls_prepass_count; i++)
         {
-            Renderer_DrawCall& draw_call = m_draw_calls[i];
+            Renderer_DrawCall& draw_call = m_draw_calls_prepass[i];
             uint64_t entity_id           = draw_call.renderable->GetEntity()->GetObjectId();
             auto& state                  = visibility_states[entity_id]; // creates if missing
     
@@ -350,9 +358,9 @@ namespace spartan
     
             bool pipeline_set = false;
     
-            for (uint32_t i = 0; i < m_draw_call_count; i++)
+            for (uint32_t i = 0; i < m_draw_calls_prepass_count; i++)
             {
-                const Renderer_DrawCall& draw_call = m_draw_calls[i];
+                const Renderer_DrawCall& draw_call = m_draw_calls_prepass[i];
     
                 if (!draw_call.is_occluder)
                     continue;
@@ -400,7 +408,7 @@ namespace spartan
             cmd_list->SetTexture(Renderer_BindingsSrv::tex, tex_occluders_hiz);
     
             // set aabb count
-            m_pcb_pass_cpu.set_f4_value(GetViewport().width, GetViewport().height, static_cast<float>(m_draw_call_count), static_cast<float>(tex_occluders_hiz->GetMipCount()));
+            m_pcb_pass_cpu.set_f4_value(GetViewport().width, GetViewport().height, static_cast<float>(m_draw_calls_prepass_count), static_cast<float>(tex_occluders_hiz->GetMipCount()));
             cmd_list->PushConstants(m_pcb_pass_cpu);
     
             // set the visibility buffer (where the occlusion results will be written)
@@ -411,15 +419,15 @@ namespace spartan
             cmd_list->SetTexture(Renderer_BindingsUav::tex, GetRenderTarget(Renderer_RenderTarget::light_diffuse));
     
             // dispatch: ceil(aabb_count / 256) thread groups
-            uint32_t thread_group_count = (m_draw_call_count + 255) / 256; // ceiling division
+            uint32_t thread_group_count = (m_draw_calls_prepass_count + 255) / 256; // ceiling division
             cmd_list->Dispatch(thread_group_count, 1, 1);
         }
     
         // update the draw calls with the previous frame's visibility results
         uint32_t* visibility_data = static_cast<uint32_t*>(GetBuffer(Renderer_Buffer::VisibilityPrevious)->GetMappedData());
-        for (uint32_t i = 0; i < m_draw_call_count; i++)
+        for (uint32_t i = 0; i < m_draw_calls_prepass_count; i++)
         {
-            Renderer_DrawCall& draw_call = m_draw_calls[i];
+            Renderer_DrawCall& draw_call = m_draw_calls_prepass[i];
             uint64_t entity_id           = draw_call.renderable->GetEntity()->GetObjectId();
             auto& state                  = visibility_states[entity_id]; // creates if missing
     
@@ -512,9 +520,9 @@ namespace spartan
             pso.clear_depth                      = 0.0f;
             cmd_list->SetPipelineState(pso);
 
-            for (uint32_t i = 0; i < m_draw_call_count; i++)
+            for (uint32_t i = 0; i < m_draw_calls_prepass_count; i++)
             {
-                const Renderer_DrawCall& draw_call = m_draw_calls[i];
+                const Renderer_DrawCall& draw_call = m_draw_calls_prepass[i];
                 Renderable* renderable             = draw_call.renderable;
                 Material* material                 = renderable->GetMaterial();
                 if (!material || material->IsTransparent() || !draw_call.camera_visible)
@@ -538,9 +546,8 @@ namespace spartan
     
                 // pass constants
                 {
-                    bool is_tessellated    = material->GetProperty(MaterialProperty::Tessellation) > 0.0f;
                     bool has_color_texture = material->HasTextureOfType(MaterialTextureType::Color);
-                    m_pcb_pass_cpu.set_f3_value(is_tessellated ? 1.0f : 0.0f, has_color_texture ? 1.0f : 0.0f, static_cast<float>(i));
+                    m_pcb_pass_cpu.set_f3_value(0.0f, has_color_texture ? 1.0f : 0.0f, static_cast<float>(i));
                     m_pcb_pass_cpu.set_is_transparent_and_material_index(false, material->GetIndex());
                     m_pcb_pass_cpu.transform = renderable->GetEntity()->GetMatrix();
                     cmd_list->PushConstants(m_pcb_pass_cpu);
@@ -558,8 +565,8 @@ namespace spartan
                         renderable->GetIndexCount(draw_call.lod_index),
                         renderable->GetIndexOffset(draw_call.lod_index),
                         renderable->GetVertexOffset(draw_call.lod_index),
-                        renderable->HasInstancing() ? draw_call.instance_index : 0,
-                        renderable->HasInstancing() ? draw_call.instance_count : 1
+                        draw_call.instance_index,
+                        draw_call.instance_count
                     );
 
                     // at this point, we don't want clear in case another render pass is implicitly started
@@ -599,7 +606,7 @@ namespace spartan
             pso.shaders[RHI_Shader_Type::Pixel]  = GetShader(Renderer_Shader::gbuffer_p);
             pso.blend_state                      = GetBlendState(Renderer_BlendState::Off);
             pso.rasterizer_state                 = GetOption<bool>(Renderer_Option::Wireframe) ? GetRasterizerState(Renderer_RasterizerState::Wireframe) : GetRasterizerState(Renderer_RasterizerState::Solid);
-            pso.depth_stencil_state              = is_transparent_pass ? GetDepthStencilState(Renderer_DepthStencilState::ReadWrite) : GetDepthStencilState(Renderer_DepthStencilState::ReadEqual);
+            pso.depth_stencil_state              = is_transparent_pass ? GetDepthStencilState(Renderer_DepthStencilState::ReadWrite) : GetDepthStencilState(Renderer_DepthStencilState::ReadEqual); // transparents are see-through, no pre-pass needed
             pso.vrs_input_texture                = GetOption<bool>(Renderer_Option::VariableRateShading) ? GetRenderTarget(Renderer_RenderTarget::shading_rate) : nullptr;
             pso.resolution_scale                 = true;
             pso.render_target_color_textures[0]  = tex_color;
@@ -624,8 +631,8 @@ namespace spartan
                 // tessellation & culling
                 {
                     bool is_tessellated = material->GetProperty(MaterialProperty::Tessellation) > 0.0f;
-                    RHI_Shader* hull     = is_tessellated ? GetShader(Renderer_Shader::tessellation_h) : nullptr;
-                    RHI_Shader* domain   = is_tessellated ? GetShader(Renderer_Shader::tessellation_d) : nullptr;
+                    RHI_Shader* hull    = is_tessellated ? GetShader(Renderer_Shader::tessellation_h) : nullptr;
+                    RHI_Shader* domain  = is_tessellated ? GetShader(Renderer_Shader::tessellation_d) : nullptr;
                 
                     if (pso.shaders[RHI_Shader_Type::Hull] != hull || pso.shaders[RHI_Shader_Type::Domain] != domain)
                     {
@@ -656,8 +663,8 @@ namespace spartan
                         renderable->GetIndexCount(draw_call.lod_index),
                         renderable->GetIndexOffset(draw_call.lod_index),
                         renderable->GetVertexOffset(draw_call.lod_index),
-                        renderable->HasInstancing() ? draw_call.instance_index : 0,
-                        renderable->HasInstancing() ? draw_call.instance_count : 1
+                        draw_call.instance_index,
+                        draw_call.instance_count
                     );
 
                     // at this point, we don't want clear in case another render pass is implicitly started
@@ -726,7 +733,6 @@ namespace spartan
 
                     RHI_VendorTechnology::SSSR_Dispatch(
                         cmd_list,
-                        GetOption<float>(Renderer_Option::ResolutionScale),
                         tex_frame, // source of reflection
                         GetRenderTarget(Renderer_RenderTarget::gbuffer_depth),
                         GetRenderTarget(Renderer_RenderTarget::gbuffer_velocity),
@@ -767,6 +773,48 @@ namespace spartan
                 cmd_list->Dispatch(tex_frame);
             }
             cmd_list->EndMarker();
+        }
+        cmd_list->EndTimeblock();
+    }
+
+    void Renderer::Pass_RayTracedReflections(RHI_CommandList* cmd_list)
+    {
+        if (!GetOption<bool>(Renderer_Option::RayTracedReflections))
+            return;
+
+        // get resources
+        RHI_Texture* tex_reflections = GetRenderTarget(Renderer_RenderTarget::ssr);
+        
+        cmd_list->BeginTimeblock("ray_traced_reflections");
+        {
+            // set pipeline state
+            RHI_PipelineState pso;
+            pso.name                   = "ray_traced_reflections";
+            pso.shaders[RayGeneration] = GetShader(Renderer_Shader::reflections_ray_generation_r);
+            pso.shaders[RayMiss]       = GetShader(Renderer_Shader::reflections_ray_miss_r);
+            pso.shaders[RayHit]        = GetShader(Renderer_Shader::reflections_ray_hit_r);
+            cmd_list->SetPipelineState(pso);
+
+            // set output textures and acceleration structure
+            SetCommonTextures(cmd_list);
+            cmd_list->SetAccelerationStructure(Renderer_BindingsSrv::tlas, GetTopLevelAccelerationStructure());
+
+            // set output texture
+            cmd_list->SetTexture(Renderer_BindingsUav::tex, tex_reflections);
+            
+            // temp: do it here for now
+          
+            if (!m_std_reflections)
+            {
+                uint32_t handle_size = RHI_Device::PropertyGetShaderGroupHandleSize();
+                m_std_reflections = make_unique<RHI_Buffer>(RHI_Buffer_Type::ShaderBindingTable, handle_size, 3, nullptr, true, "reflections_sbt");
+                m_std_reflections->UpdateHandles(cmd_list);
+            }
+ 
+            // trace full screen (match tex resolution)
+            uint32_t width  = tex_reflections->GetWidth();
+            uint32_t height = tex_reflections->GetHeight();
+            cmd_list->TraceRays(width, height, m_std_reflections.get());
         }
         cmd_list->EndTimeblock();
     }
@@ -1012,7 +1060,7 @@ namespace spartan
 
             // push pass constants
             m_pcb_pass_cpu.set_is_transparent_and_material_index(is_transparent_pass);
-            m_pcb_pass_cpu.set_f3_value(static_cast<float>(tex_skysphere->GetMipCount()), GetOption<float>(Renderer_Option::Fog), 0.0f);
+            m_pcb_pass_cpu.set_f3_value(0.0f, GetOption<float>(Renderer_Option::Fog), 0.0f);
             cmd_list->PushConstants(m_pcb_pass_cpu);
 
             // set textures
@@ -1108,85 +1156,104 @@ namespace spartan
         // acquire render targets
         RHI_Texture* rt_frame_output         = GetRenderTarget(Renderer_RenderTarget::frame_output);
         RHI_Texture* rt_frame_output_scratch = GetRenderTarget(Renderer_RenderTarget::frame_output_2);
-
-        cmd_list->BeginMarker("post_proccess");
-
-        // macros which allows us to keep track of which texture is an input/output for each pass
-        bool swap_output = true;
-        #define get_output_in  swap_output ? rt_frame_output_scratch : rt_frame_output
-        #define get_output_out swap_output ? rt_frame_output : rt_frame_output_scratch
-
+        cmd_list->BeginMarker("post_process");
+    
+        // track current input explicitly for robustness
+        RHI_Texture* tex_in  = rt_frame_output;
+        RHI_Texture* tex_out = rt_frame_output_scratch;
+        bool any_pass_ran    = false;
+    
         // depth of field
         if (GetOption<bool>(Renderer_Option::DepthOfField))
         {
-            swap_output = !swap_output;
-            Pass_DepthOfField(cmd_list, get_output_in, get_output_out);
+            Pass_DepthOfField(cmd_list, tex_in, tex_out);
+            swap(tex_in, tex_out);
+            any_pass_ran = true;
         }
-        
+    
         // motion blur
         if (GetOption<bool>(Renderer_Option::MotionBlur))
         {
-            swap_output = !swap_output;
-            Pass_MotionBlur(cmd_list, get_output_in, get_output_out);
+            Pass_MotionBlur(cmd_list, tex_in, tex_out);
+            swap(tex_in, tex_out);
+            any_pass_ran = true;
         }
-        
+    
         // bloom
         if (GetOption<bool>(Renderer_Option::Bloom))
         {
-            swap_output = !swap_output;
-            Pass_Bloom(cmd_list, get_output_in, get_output_out);
+            Pass_Bloom(cmd_list, tex_in, tex_out);
+            swap(tex_in, tex_out);
+            any_pass_ran = true;
         }
-
-        // auto exposure
-        Pass_AutoExposure(cmd_list, get_output_in);
-
-        // tone-mapping & gamma correction
+    
+        // auto-exposure
+        if (GetOption<float>(Renderer_Option::AutoExposureAdaptationSpeed) > 0.0f)
         {
-            swap_output = !swap_output;
-            Pass_Output(cmd_list, get_output_in, get_output_out);
-        }
+            RHI_Texture* tex_exposure = tex_in;
 
+            // auto-exposure needs mips
+            if (any_pass_ran)
+            {
+                if (!tex_in->HasPerMipViews())
+                {
+                    tex_exposure = tex_out;
+                    cmd_list->Blit(tex_in, tex_exposure, false);
+                }
+                
+                Pass_Downscale(cmd_list, tex_exposure, Renderer_DownsampleFilter::Average);
+            }
+            
+            Pass_AutoExposure(cmd_list, tex_exposure);
+        }
+    
+        // tone-mapping & gamma correction
+        Pass_Output(cmd_list, tex_in, tex_out);
+        swap(tex_in, tex_out);
+    
         // dithering
         if (GetOption<bool>(Renderer_Option::Dithering))
         {
-            swap_output = !swap_output;
-            Pass_Dithering(cmd_list, get_output_in, get_output_out);
+            Pass_Dithering(cmd_list, tex_in, tex_out);
+            swap(tex_in, tex_out);
         }
-
+    
         // sharpening
-        if (GetOption<bool>(Renderer_Option::Sharpness) && GetOption<Renderer_AntiAliasing_Upsampling>(Renderer_Option::AntiAliasing_Upsampling) != Renderer_AntiAliasing_Upsampling::AA_Fsr_Upscale_Fsr)
+        Renderer_AntiAliasing_Upsampling aa_upsampling = GetOption<Renderer_AntiAliasing_Upsampling>(Renderer_Option::AntiAliasing_Upsampling);
+        bool is_fsr                                    = aa_upsampling == Renderer_AntiAliasing_Upsampling::AA_Fsr_Upscale_Fsr; // fsr does it's own sharpening
+        if (GetOption<bool>(Renderer_Option::Sharpness) && !is_fsr)
         {
-            swap_output = !swap_output;
-            Pass_Sharpening(cmd_list, get_output_in, get_output_out);
+            Pass_Sharpening(cmd_list, tex_in, tex_out);
+            swap(tex_in, tex_out);
         }
-        
+    
         // film grain
         if (GetOption<bool>(Renderer_Option::FilmGrain))
         {
-            swap_output = !swap_output;
-            Pass_FilmGrain(cmd_list, get_output_in, get_output_out);
+            Pass_FilmGrain(cmd_list, tex_in, tex_out);
+            swap(tex_in, tex_out);
         }
-
+    
         // chromatic aberration
         if (GetOption<bool>(Renderer_Option::ChromaticAberration))
         {
-            swap_output = !swap_output;
-            Pass_ChromaticAberration(cmd_list, get_output_in, get_output_out);
+            Pass_ChromaticAberration(cmd_list, tex_in, tex_out);
+            swap(tex_in, tex_out);
         }
-
+    
         // vhs
         if (GetOption<bool>(Renderer_Option::Vhs))
         {
-            swap_output = !swap_output;
-            Pass_Vhs(cmd_list, get_output_in, get_output_out);
+            Pass_Vhs(cmd_list, tex_in, tex_out);
+            swap(tex_in, tex_out);
         }
-
-        // if the last written texture is not the output one, then make sure it is
-        if (!swap_output)
+    
+        // ensure final output is in rt_frame_output
+        if (tex_in != rt_frame_output)
         {
-            cmd_list->Copy(rt_frame_output_scratch, rt_frame_output, false);
+            cmd_list->Copy(tex_in, rt_frame_output, false);
         }
-
+    
         // editor
         Pass_Grid(cmd_list, rt_frame_output);
         Pass_Lines(cmd_list, rt_frame_output);
@@ -1476,7 +1543,6 @@ namespace spartan
             {
                 RHI_VendorTechnology::XeSS_Dispatch(
                     cmd_list,
-                    resolution_scale,
                     tex_in,
                     tex_depth,
                     tex_velocity,
@@ -1490,7 +1556,6 @@ namespace spartan
                     World::GetCamera(),
                     m_cb_frame_cpu.delta_time,
                     GetOption<float>(Renderer_Option::Sharpness),
-                    resolution_scale,
                     tex_in,
                     tex_depth,
                     tex_velocity,
@@ -1520,24 +1585,9 @@ namespace spartan
     void Renderer::Pass_AutoExposure(RHI_CommandList* cmd_list, RHI_Texture* tex_in)
     {
         // get resources
-        RHI_Texture* tex_exposure          = GetRenderTarget(Renderer_RenderTarget::auto_exposure);          // current
-        RHI_Texture* tex_exposure_previous = GetRenderTarget(Renderer_RenderTarget::auto_exposure_previous); // previous
+        RHI_Texture* tex_exposure          = GetRenderTarget(Renderer_RenderTarget::auto_exposure);
+        RHI_Texture* tex_exposure_previous = GetRenderTarget(Renderer_RenderTarget::auto_exposure_previous);
 
-        // clear once if disabled or continue if enabled
-        float adaptation_speed         = GetOption<float>(Renderer_Option::AutoExposureAdaptationSpeed);
-        static bool cleared_on_disable = false;
-        if (adaptation_speed <= 0.0f)
-        {
-            if (!cleared_on_disable)
-            {
-                cmd_list->ClearTexture(tex_exposure, Color::standard_white);
-                cmd_list->ClearTexture(tex_exposure_previous, Color::standard_white);
-                cleared_on_disable = true;
-            }
-            return;
-        }
-        cleared_on_disable = false;
-    
         // define pipeline state
         RHI_PipelineState pso;
         pso.name             = "auto_exposure";
@@ -1549,15 +1599,13 @@ namespace spartan
             cmd_list->SetPipelineState(pso);
     
             // push constants
-            m_pcb_pass_cpu.set_f3_value(adaptation_speed);
+            m_pcb_pass_cpu.set_f3_value(GetOption<float>(Renderer_Option::AutoExposureAdaptationSpeed));
             cmd_list->PushConstants(m_pcb_pass_cpu);
     
-            // input: smallest mip (downsampled frame)
-            cmd_list->SetTexture(Renderer_BindingsSrv::tex, tex_in, tex_in->GetMipCount() - 1, 1);
-            // input: previous exposure
-            cmd_list->SetTexture(Renderer_BindingsSrv::tex2, tex_exposure_previous);
-            // output: current exposure
-            cmd_list->SetTexture(Renderer_BindingsUav::tex, tex_exposure); 
+            cmd_list->SetTexture(Renderer_BindingsSrv::tex, tex_in);                 // input: current frame
+            cmd_list->SetTexture(Renderer_BindingsSrv::tex2, tex_exposure_previous); // input: previous exposure value
+            cmd_list->SetTexture(Renderer_BindingsUav::tex, tex_exposure);           // output: current exposure value
+
             // single dispatch: just writes 1 value
             cmd_list->Dispatch(1, 1, 1);
     
@@ -1940,46 +1988,58 @@ namespace spartan
 
         if (Camera* camera = World::GetCamera())
         {
-            if (Entity* entity_selected = camera->GetSelectedEntity())
+            const std::vector<Entity*>& selected_entities = camera->GetSelectedEntities();
+            if (!selected_entities.empty())
             {
                 cmd_list->BeginTimeblock("outline");
                 {
                     RHI_Texture* tex_outline = GetRenderTarget(Renderer_RenderTarget::outline);
 
-                    if (Renderable* renderable = entity_selected->GetComponent<Renderable>())
+                    // draw silhouettes for all selected entities
+                    bool any_rendered = false;
+                    cmd_list->BeginMarker("color_silhouette");
                     {
-                        cmd_list->BeginMarker("color_silhouette");
+                        // set pipeline state once for all entities
+                        RHI_PipelineState pso;
+                        pso.name                             = "color_silhouette";
+                        pso.shaders[RHI_Shader_Type::Vertex] = shader_v;
+                        pso.shaders[RHI_Shader_Type::Pixel]  = shader_p;
+                        pso.rasterizer_state                 = GetRasterizerState(Renderer_RasterizerState::Solid);
+                        pso.blend_state                      = GetBlendState(Renderer_BlendState::Additive);
+                        pso.depth_stencil_state              = GetDepthStencilState(Renderer_DepthStencilState::Off);
+                        pso.render_target_color_textures[0]  = tex_outline;
+                        pso.clear_color[0]                   = Color::standard_transparent;
+                        cmd_list->SetPipelineState(pso);
+                    
+                        // render each selected entity
+                        for (Entity* entity_selected : selected_entities)
                         {
-                            // set pipeline state
-                            RHI_PipelineState pso;
-                            pso.name                             = "color_silhouette";
-                            pso.shaders[RHI_Shader_Type::Vertex] = shader_v;
-                            pso.shaders[RHI_Shader_Type::Pixel]  = shader_p;
-                            pso.rasterizer_state                 = GetRasterizerState(Renderer_RasterizerState::Solid);
-                            pso.blend_state                      = GetBlendState(Renderer_BlendState::Off);
-                            pso.depth_stencil_state              = GetDepthStencilState(Renderer_DepthStencilState::Off);
-                            pso.render_target_color_textures[0]  = tex_outline;
-                            pso.clear_color[0]                   = Color::standard_transparent;
-                            cmd_list->SetPipelineState(pso);
-                        
-                            // render
-                            {
-                                // push draw data
-                                m_pcb_pass_cpu.set_f4_value(Color::standard_renderer_lines);
-                                m_pcb_pass_cpu.transform = entity_selected->GetMatrix();
-                                cmd_list->PushConstants(m_pcb_pass_cpu);
+                            if (!entity_selected)
+                                continue;
+                                
+                            Renderable* renderable = entity_selected->GetComponent<Renderable>();
+                            if (!renderable)
+                                continue;
+                                
+                            // no mesh (vertex/index buffer) can occur if the mesh is selected but not loaded or the user removed it
+                            if (!renderable->GetVertexBuffer() || !renderable->GetIndexBuffer())
+                                continue;
 
-                                // no mesh (vertex/index buffer) can occur if the mesh is selected but not loaded or the user removed it
-                                if (renderable->GetVertexBuffer() && renderable->GetIndexBuffer())
-                                {
-                                    cmd_list->SetBufferVertex(renderable->GetVertexBuffer());
-                                    cmd_list->SetBufferIndex(renderable->GetIndexBuffer());
-                                    cmd_list->DrawIndexed(renderable->GetIndexCount(), renderable->GetIndexOffset(), renderable->GetVertexOffset());
-                                }
-                            }
+                            // push draw data
+                            m_pcb_pass_cpu.set_f4_value(Color::standard_renderer_lines);
+                            m_pcb_pass_cpu.transform = entity_selected->GetMatrix();
+                            cmd_list->PushConstants(m_pcb_pass_cpu);
+
+                            cmd_list->SetBufferVertex(renderable->GetVertexBuffer());
+                            cmd_list->SetBufferIndex(renderable->GetIndexBuffer());
+                            cmd_list->DrawIndexed(renderable->GetIndexCount(), renderable->GetIndexOffset(), renderable->GetVertexOffset());
+                            any_rendered = true;
                         }
-                        cmd_list->EndMarker();
-                        
+                    }
+                    cmd_list->EndMarker();
+                    
+                    if (any_rendered)
+                    {
                         // blur the color silhouette
                         {
                             const float radius = 30.0f;

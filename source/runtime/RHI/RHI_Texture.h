@@ -108,14 +108,9 @@ namespace spartan
         static bool IsCompressedFormat(const RHI_Format format);
         bool IsCompressedFormat()               { return IsCompressedFormat(m_format); }
 
-        // external memory
-        void* GetExternalMemoryHandle() const      { return m_rhi_external_memory; }
-        void SetExternalMemoryHandle(void* handle) { m_rhi_external_memory = handle; }
-
         // misc
         void ClearData();
         void PrepareForGpu();
-        void SaveAsImage(const std::string& file_path);
         static size_t CalculateMipSize(uint32_t width, uint32_t height, uint32_t depth, RHI_Format format, uint32_t bits_per_channel, uint32_t channel_count);
 
         // data
@@ -191,7 +186,6 @@ namespace spartan
         std::array<void*, rhi_max_render_target_count> m_rhi_rtv = { nullptr };
         std::array<void*, rhi_max_render_target_count> m_rhi_dsv = { nullptr };
         void* m_rhi_resource                                     = nullptr;
-        void* m_rhi_external_memory                              = nullptr;
         void* m_mapped_data                                      = nullptr;
 
     private:

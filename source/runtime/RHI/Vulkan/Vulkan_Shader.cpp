@@ -53,7 +53,7 @@ namespace spartan
             // this only matters for textures
             RHI_Image_Layout layout = RHI_Image_Layout::Max;
             layout                  = descriptor_type == RHI_Descriptor_Type::TextureStorage ? RHI_Image_Layout::General     : layout;
-            layout                  = descriptor_type == RHI_Descriptor_Type::Image        ? RHI_Image_Layout::Shader_Read : layout;
+            layout                  = descriptor_type == RHI_Descriptor_Type::Image          ? RHI_Image_Layout::Shader_Read : layout;
 
             for (const Resource& resource : resources)
             {
@@ -96,8 +96,16 @@ namespace spartan
 
         // arguments
         {
-            arguments.emplace_back("-E"); arguments.emplace_back(GetEntryPoint());
-            arguments.emplace_back("-T"); arguments.emplace_back(GetTargetProfile());
+            // entry point - doesn't apply to libraries (ray tracing)
+            if (const char* entry_point = GetEntryPoint())
+            {
+                arguments.emplace_back("-E");
+                arguments.emplace_back(entry_point);
+            }
+
+            // target profile
+            arguments.emplace_back("-T");
+            arguments.emplace_back(GetTargetProfile());
 
             // spir-v
             {
@@ -120,7 +128,7 @@ namespace spartan
                 arguments.emplace_back("-fvk-use-dx-layout");     // use DirectX memory layout for Vulkan resources
                 arguments.emplace_back("-fvk-use-dx-position-w"); // reciprocate SV_Position.w after reading from stage input in PS to accommodate the difference between Vulkan and DirectX
 
-                // negate SV_Position.y before writing to stage output in VS/DS/GS to accommodate Vulkan's coordinate system
+                // negate SV_Position.y before writing to stage output in vs/ds/gs to accommodate vulkan's coordinate system
                 if (m_shader_type == RHI_Shader_Type::Vertex || m_shader_type == RHI_Shader_Type::Domain)
                 {
                     arguments.emplace_back("-fvk-invert-y");
@@ -209,10 +217,11 @@ namespace spartan
         const CompilerHLSL compiler = CompilerHLSL(ptr, size);
         ShaderResources resources   = compiler.get_shader_resources();
 
-        spirv_resources_to_descriptors(compiler, m_descriptors, resources.separate_images,       RHI_Descriptor_Type::Image,              shader_stage); // srv
-        spirv_resources_to_descriptors(compiler, m_descriptors, resources.storage_images,        RHI_Descriptor_Type::TextureStorage,     shader_stage); // uav
-        spirv_resources_to_descriptors(compiler, m_descriptors, resources.storage_buffers,       RHI_Descriptor_Type::StructuredBuffer,   shader_stage);
-        spirv_resources_to_descriptors(compiler, m_descriptors, resources.uniform_buffers,       RHI_Descriptor_Type::ConstantBuffer,     shader_stage);
-        spirv_resources_to_descriptors(compiler, m_descriptors, resources.push_constant_buffers, RHI_Descriptor_Type::PushConstantBuffer, shader_stage);
+        spirv_resources_to_descriptors(compiler, m_descriptors, resources.separate_images,         RHI_Descriptor_Type::Image,                 shader_stage); // srv
+        spirv_resources_to_descriptors(compiler, m_descriptors, resources.storage_images,          RHI_Descriptor_Type::TextureStorage,        shader_stage); // uav
+        spirv_resources_to_descriptors(compiler, m_descriptors, resources.storage_buffers,         RHI_Descriptor_Type::StructuredBuffer,      shader_stage);
+        spirv_resources_to_descriptors(compiler, m_descriptors, resources.uniform_buffers,         RHI_Descriptor_Type::ConstantBuffer,        shader_stage);
+        spirv_resources_to_descriptors(compiler, m_descriptors, resources.push_constant_buffers,   RHI_Descriptor_Type::PushConstantBuffer,    shader_stage);
+        spirv_resources_to_descriptors(compiler, m_descriptors, resources.acceleration_structures, RHI_Descriptor_Type::AccelerationStructure, shader_stage);
     }
 }

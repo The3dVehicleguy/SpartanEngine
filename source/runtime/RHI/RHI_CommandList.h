@@ -65,6 +65,11 @@ namespace spartan
         void WaitForExecution(const bool log_wait_time = false);
         void SetPipelineState(RHI_PipelineState& pso);
 
+        // immediate execution
+        static RHI_CommandList* ImmediateExecutionBegin(const RHI_Queue_Type queue_type);
+        static void ImmediateExecutionEnd(RHI_CommandList* cmd_list);
+        static void ImmediateExecutionShutdown();
+
         // clear
         void ClearPipelineStateRenderTargets(RHI_PipelineState& pipeline_state);
         void ClearTexture(
@@ -81,6 +86,9 @@ namespace spartan
         // dispatch
         void Dispatch(uint32_t x, uint32_t y, uint32_t z = 1);
         void Dispatch(RHI_Texture* texture, float resolution_scale = 1.0f);
+
+        // trace rays
+        void TraceRays(const uint32_t width, const uint32_t height, RHI_Buffer* shader_binding_table);
 
         // blit
         void Blit(RHI_Texture* source, RHI_Texture* destination, const bool blit_mips, const float source_scaling = 1.0f);
@@ -119,6 +127,9 @@ namespace spartan
         void SetTexture(const Renderer_BindingsUav slot, RHI_Texture* texture,  const uint32_t mip_index = rhi_all_mips, uint32_t mip_range = 0) { SetTexture(static_cast<uint32_t>(slot), texture, mip_index, mip_range, true); }
         void SetTexture(const Renderer_BindingsSrv slot, RHI_Texture* texture,  const uint32_t mip_index = rhi_all_mips, uint32_t mip_range = 0) { SetTexture(static_cast<uint32_t>(slot), texture, mip_index, mip_range, false); }
 
+        // acceleration structure
+        void SetAccelerationStructure(Renderer_BindingsSrv slot, RHI_AccelerationStructure* tlas);
+
         // markers
         void BeginMarker(const char* name);
         void EndMarker();
@@ -154,16 +165,20 @@ namespace spartan
         void InsertBarrierReadWrite(RHI_Buffer* buffer);
         void InsertPendingBarrierGroup();
 
-        // misc
-        void RenderPassEnd();
-        RHI_SyncPrimitive* GetRenderingCompleteSemaphore() { return m_rendering_complete_semaphore.get(); }
-        void* GetRhiResource() const                       { return m_rhi_resource; }
-        const RHI_CommandListState GetState() const        { return m_state; }
-        RHI_Queue* GetQueue() const                        { return m_queue; }
-
         // layouts
         static void RemoveLayout(void* image);
         static RHI_Image_Layout GetImageLayout(void* image, uint32_t mip_index);
+
+        // misc
+        void RenderPassEnd();
+        RHI_SyncPrimitive* GetRenderingCompleteSemaphore() { return m_rendering_complete_semaphore.get(); }
+        const RHI_CommandListState GetState() const        { return m_state; }
+        RHI_Queue* GetQueue() const                        { return m_queue; }
+        void CopyTextureToBuffer(RHI_Texture* source, RHI_Buffer* destination);
+
+        // rhi
+        void* GetRhiResourcePipeline();
+        void* GetRhiResource() const { return m_rhi_resource; }
 
     private:
         void PreDraw();
@@ -175,6 +190,7 @@ namespace spartan
 
         // misc
         uint64_t m_buffer_id_vertex                          = 0;
+        uint64_t m_buffer_id_instance                        = 0;
         uint64_t m_buffer_id_index                           = 0;
         uint32_t m_timestamp_index                           = 0;
         RHI_Pipeline* m_pipeline                             = nullptr;
@@ -182,7 +198,6 @@ namespace spartan
         std::atomic<RHI_CommandListState> m_state            = RHI_CommandListState::Idle;
         RHI_CullMode m_cull_mode                             = RHI_CullMode::Back;
         bool m_render_pass_active                            = false;
-        uint32_t m_render_pass_draw_calls                    = 0;
         std::stack<const char*> m_active_timeblocks;
         std::stack<const char*> m_debug_label_stack;
         std::mutex m_mutex_reset;

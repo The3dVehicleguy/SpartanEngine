@@ -162,6 +162,16 @@ namespace spartan
         static_cast<ID3D12GraphicsCommandList*>(m_rhi_resource)->Dispatch(x, y, z);
     }
 
+    void RHI_CommandList::TraceRays(const uint32_t width, const uint32_t height, RHI_Buffer* shader_binding_table)
+    {
+
+    }
+
+    void RHI_CommandList::SetAccelerationStructure(Renderer_BindingsSrv slot, RHI_AccelerationStructure* tlas)
+    {
+
+    }
+
     void RHI_CommandList::Blit(RHI_Texture* source, RHI_Texture* destination, const bool blit_mips, const float resolution_scale)
     {
         SP_ASSERT_MSG(false, "Function is not implemented");
@@ -397,5 +407,25 @@ namespace spartan
     RHI_Image_Layout RHI_CommandList::GetImageLayout(void* image, const uint32_t mip_index)
     {
         return RHI_Image_Layout::Max;
+    }
+
+    void RHI_CommandList::CopyTextureToBuffer(RHI_Texture* source, RHI_Buffer* destination)
+    {
+
+    }
+
+    RHI_CommandList* RHI_CommandList::ImmediateExecutionBegin(const RHI_Queue_Type queue_type)
+    {
+        return nullptr;
+    }
+    
+    void RHI_CommandList::ImmediateExecutionEnd(RHI_CommandList* cmd_list)
+    {
+
+    }
+
+    void RHI_CommandList::ImmediateExecutionShutdown()
+    {
+
     }
 }

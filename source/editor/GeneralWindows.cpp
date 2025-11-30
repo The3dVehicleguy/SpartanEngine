@@ -30,6 +30,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "Input/Input.h"
 #include "Game/Game.h"
 #include "Core/ProgressTracker.h"
+#include "RHI/RHI_Device.h"
 //================================
 
 //= NAMESPACES =====
@@ -53,8 +54,8 @@ namespace
             if (ImGui::Begin("Support Spartan Engine", &visible, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize))
             {
                 ImGui::PushItemWidth(500.0f * spartan::Window::GetDpiScale());
-                ImGui::Text("I cover the costs for Dropbox hosting and a GitHub Pro subscription for benefits like assets and package bandwidth.");
-                ImGui::Text("If you enjoy the simplicity of running a single script and have everything download and just work, please consider sponsoring to help keep everything running smoothly!");
+                ImGui::Text("I cover the costs for hosting and bandwidth of engine assets");
+                ImGui::Text("If you enjoy the simplicity of running a single script, build, run and have everything just work, please consider sponsoring to help keep everything running smoothly!");
                 ImGui::PopItemWidth();
 
                 ImGui::Separator();
@@ -81,7 +82,7 @@ namespace
             if (ImGui::Begin("What should you expect", &visible, ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_AlwaysAutoResize))
             {
                 ImGui::PushItemWidth(500.0f * spartan::Window::GetDpiScale());
-                ImGui::Text("This isn't an engine for the average user, it's designed for advanced research and experimentation, ideal for industry veterans.");
+                ImGui::Text("This isn't an engine for the average user, it's designed for advanced research, ideal for game engine and rendering engineers.");
                 ImGui::PopItemWidth();
 
                 ImGui::Separator();
@@ -143,6 +144,7 @@ namespace
             { "Spartan", "Tri Tran",            "Belgium",        "LinkedIn",  "https://www.linkedin.com/in/mtrantr/",                    "Screen space shadows (Days Gone)",                                        "Starfield" },
             { "Spartan", "Ege",                 "Turkey",         "X",         "https://x.com/egedq",                                     "Editor theme v3 + save/load themes",                                      "N/A" },
             { "Spartan", "Sandro Mtchedlidze",  "Georgia",        "Artstation","https://www.artstation.com/sandromch",                    "Tonemapper, perf/lighting finds, tubes lights in the car showroom world", "N/A" },
+            { "Spartan", "Dimitris Kalyvas",    "Greece",         "X",         "https://x.com/punctuator_",                               "Entity multi-select, material uv inversion",                              "N/A" },
             { "Hoplite", "Apostolos Bouzalas",  "Greece",         "LinkedIn",  "https://www.linkedin.com/in/apostolos-bouzalas",          "A few performance reports",                                               "N/A" },
             { "Hoplite", "Nikolas Pattakos",    "Greece",         "LinkedIn",  "https://www.linkedin.com/in/nikolaspattakos/",            "GCC fixes",                                                               "N/A" },
             { "Hoplite", "Roman Koshchei",      "Ukraine",        "X",         "https://x.com/roman_koshchei",                            "Circular stack (undo/redo)",                                              "N/A" },
@@ -178,7 +180,7 @@ namespace
                 ImGui::SetCursorPosY(ImGui::GetCursorPosY() - y_shift);
                 if (ImGuiSp::button("X"))
                 {
-                    spartan::FileSystem::OpenUrl("https://twitter.com/panoskarabelas1");
+                    spartan::FileSystem::OpenUrl("https://twitter.com/panoskarabelas");
                 }
             }
             ImGui::EndGroup();
@@ -220,7 +222,7 @@ namespace
         
                     // url button
                     ImGui::TableSetColumnIndex(3);
-                    ImGui::PushID(&c); // unique ID per row
+                    ImGui::PushID(&c); // unique id per row
                     if (ImGui::Button(c.button_text.c_str()))
                     {
                         spartan::FileSystem::OpenUrl(c.button_url);
@@ -294,7 +296,6 @@ namespace
             {
                 ImGui::BeginGroup();
                 {
-                    // my details
                     personal_details();
 
                     ImGui::Separator();
@@ -405,23 +406,24 @@ namespace
 
     namespace worlds
     {
-        struct World
+        struct WorldEntry
         {
             const char* name;
             const char* description;
+            const char* status;      // wip, prototype, complete
             const char* performance; // light, moderate, demanding
-            const char* status;      // WIP, Prototype, Complete
+            uint32_t vram;           // min vram requirement in megabytes
         };
 
-        static const World worlds[] =
+        const WorldEntry worlds[] =
         {
-            { "Car Showroom", "Showcase world for YouTubers/Press. Does not use experimental tech.", "Light", "Complete" },
-            { "Open World Forest", "Millions of Ghost of Tsushima grass blades. Extremely demanding.", "Very demanding", "Prototype" },
-            { "Liminal Space", "Shifts your frequency to a nearby reality.", "Light", "Prototype" },
-            { "Sponza 4K", "High-resolution textures & meshes.", "Demanding", "Complete" },
-            { "Subway", "GI test. No lights, only emissive textures.", "Moderate", "Complete" },
-            { "Minecraft", "Blocky aesthetic.", "Light", "Complete" },
-            { "Basic", "Light, camera, floor.", "Light", "Complete" }
+            { "Car Showroom",      "Showcase world for YouTubers/Press. Does not use experimental tech", "Complete" , "Light",          2100 },
+            { "Open World Forest", "256 million of Ghost of Tsushima grass blades",                      "Prototype", "Very demanding", 5600 },
+            { "Liminal Space",     "Shifts your frequency to a nearby reality",                          "Prototype", "Light",          2100 },
+            { "Sponza 4K",         "High-resolution textures & meshes",                                  "Complete" , "Demanding",      2600 },
+            { "Subway",            "GI test. No lights, only emissive textures",                         "Complete" , "Moderate",       2600 },
+            { "Minecraft",         "Blocky aesthetic",                                                   "Complete" , "Light",          2100 },
+            { "Basic",             "Light, camera, floor",                                               "Complete" , "Light",          2100 }
         };
         int world_index = 0;
 
@@ -523,15 +525,28 @@ namespace
 
                     ImGui::BeginChild("right_panel", ImVec2(800, list_height), true);
                     {
-                        const World& w = worlds[world_index];
+                        const WorldEntry& w = worlds[world_index];
 
                         // push full window wrap
                         ImGui::PushTextWrapPos(0.0f);
                         ImGui::TextWrapped("Description: %s", w.description);
                         ImGui::Separator();
+                        ImGui::TextWrapped("Status: %s", w.status);
+                        ImGui::Separator();
                         ImGui::TextWrapped("Performance: %s", w.performance);
                         ImGui::Separator();
-                        ImGui::TextWrapped("Status: %s", w.status);
+                        uint64_t system_vram_mb = spartan::RHI_Device::MemoryGetTotalMb();
+                        bool vram_sufficient    = system_vram_mb >= w.vram;
+                        ImGui::TextWrapped("Minimum VRAM:");
+                        ImGui::SameLine();
+                        if (!vram_sufficient)
+                        {
+                            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%u MB (System: %u MB)", w.vram, system_vram_mb);
+                        }
+                        else
+                        {
+                            ImGui::TextWrapped("%u MB (System: %u MB)", w.vram, system_vram_mb);
+                        }
                         ImGui::PopTextWrapPos();
                     }
                     ImGui::EndChild();

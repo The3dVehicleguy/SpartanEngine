@@ -50,6 +50,7 @@ namespace spartan
     class RHI_Texture;
     class RHI_Shader;
     class RHI_SyncPrimitive;
+    class RHI_AccelerationStructure;
     struct RHI_Texture_Mip;
     struct RHI_Texture_Slice;
     struct RHI_Vertex_Undefined;
@@ -214,6 +215,7 @@ namespace spartan
         Pipeline,
         PipelineLayout,
         Queue,
+        AccelerationStructure,
         Max
     };
 
@@ -266,6 +268,7 @@ namespace spartan
         PushConstantBuffer,
         ConstantBuffer,
         StructuredBuffer,
+        AccelerationStructure,
         Max
     };
 
@@ -289,6 +292,9 @@ namespace spartan
         Domain,
         Pixel,
         Compute,
+        RayGeneration,
+        RayMiss,
+        RayHit,
         Max
     };
 
@@ -296,12 +302,15 @@ namespace spartan
     {
         switch (type)
         {
-            case RHI_Shader_Type::Vertex:  return 1 << 0;
-            case RHI_Shader_Type::Hull:    return 1 << 1;
-            case RHI_Shader_Type::Domain:  return 1 << 2;
-            case RHI_Shader_Type::Pixel:   return 1 << 3;
-            case RHI_Shader_Type::Compute: return 1 << 4;
-            default:                       return 0;
+            case RHI_Shader_Type::Vertex:        return 1 << 0;
+            case RHI_Shader_Type::Hull:          return 1 << 1;
+            case RHI_Shader_Type::Domain:        return 1 << 2;
+            case RHI_Shader_Type::Pixel:         return 1 << 3;
+            case RHI_Shader_Type::Compute:       return 1 << 4;
+            case RHI_Shader_Type::RayGeneration: return 1 << 5;
+            case RHI_Shader_Type::RayMiss:       return 1 << 6;
+            case RHI_Shader_Type::RayHit:        return 1 << 7;
+            default:                             return 0;
         }
     }
 
@@ -463,7 +472,7 @@ namespace spartan
     const uint32_t rhi_stencil_load              = std::numeric_limits<uint32_t>::infinity();
     const uint8_t  rhi_max_render_target_count   = 8;
     const uint8_t  rhi_max_constant_buffer_count = 8;
-    const uint32_t rhi_max_array_size            = 16384;
+    const uint32_t rhi_max_array_size            = 4096;
     const uint32_t rhi_max_descriptor_set_count  = 512;
     const uint32_t  rhi_max_mip_count            = 13;
     const uint32_t rhi_all_mips                  = std::numeric_limits<uint32_t>::max();

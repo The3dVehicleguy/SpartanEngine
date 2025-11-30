@@ -19,7 +19,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-//= INCLUDES ==========================
+//= INCLUDES ==============================
 #include "pch.h"
 #include "../RHI_Pipeline.h"
 #include "../RHI_Implementation.h"
@@ -34,7 +34,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_Texture.h"
 #include "../RHI_VendorTechnology.h"
 #include "../Core/Debugging.h"
-//=====================================
+#include "../World/Components/Renderable.h"
+//=========================================
 
 //= NAMESPACES =====
 using namespace std;
@@ -71,10 +72,21 @@ namespace spartan
             {
                 shader_stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
             }
-
-            SP_ASSERT(shader_stage_info.stage  != 0);
+            else if (shader->GetShaderStage() == RHI_Shader_Type::RayGeneration)
+            {
+                shader_stage_info.stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+            }
+            else if (shader->GetShaderStage() == RHI_Shader_Type::RayMiss)
+            {
+                shader_stage_info.stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+            }
+            else if (shader->GetShaderStage() == RHI_Shader_Type::RayHit)
+            {
+                shader_stage_info.stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+            }
+            SP_ASSERT(shader_stage_info.stage != 0);
             SP_ASSERT(shader_stage_info.module != nullptr);
-            SP_ASSERT(shader_stage_info.pName  != nullptr);
+            SP_ASSERT(shader_stage_info.pName != nullptr);
 
             return shader_stage_info;
         }
@@ -179,7 +191,7 @@ namespace spartan
                     {
                         dynamic_states.push_back(VK_DYNAMIC_STATE_SCISSOR);
                         dynamic_states.push_back(VK_DYNAMIC_STATE_CULL_MODE);
-                        if (RHI_Device::PropertyIsShadingRateSupported())
+                        if (RHI_Device::IsSupportedVrs())
                         { 
                             dynamic_states.push_back(VK_DYNAMIC_STATE_FRAGMENT_SHADING_RATE_KHR);
                         }
@@ -262,26 +274,17 @@ namespace spartan
                     }
                 }
             
-                // instance buffer (binding 1) - for instance transform (matrix) in geometry vertices
+                // instance buffer (binding 1) - for instance transform (position, rotation, scale)
                 if (is_geometry_pass_vertex)
                 {
-                    vertex_input_binding_descs.push_back({
-                        1,                            // binding
-                        sizeof(math::Matrix),         // stride
-                        VK_VERTEX_INPUT_RATE_INSTANCE // input rate
-                    });
-            
-                    // add attribute descriptions for instance transform (4 rows of the matrix)
-                    uint32_t base_location = static_cast<uint32_t>(vertex_attribute_descs.size()); // next available location (e.g., 4)
-                    for (uint32_t i = 0; i < 4; i++)
-                    {
-                        vertex_attribute_descs.push_back({
-                            base_location + i,                               // location (e.g., 4, 5, 6, 7)
-                            1,                                               // binding (instance buffer)
-                            VK_FORMAT_R32G32B32A32_SFLOAT,                   // format (vec4 per row)
-                            static_cast<uint32_t>(i * sizeof(math::Vector4)) // offset
-                        });
-                    }
+                    vertex_input_binding_descs.emplace_back(1, static_cast<uint32_t>(sizeof(Instance)), VK_VERTEX_INPUT_RATE_INSTANCE);
+                    uint32_t start_index = static_cast<uint32_t>(vertex_attribute_descs.size());
+                    vertex_attribute_descs.emplace_back(start_index++, 1, VK_FORMAT_R16_SFLOAT, static_cast<uint32_t>(offsetof(Instance, position_x)));
+                    vertex_attribute_descs.emplace_back(start_index++, 1, VK_FORMAT_R16_SFLOAT, static_cast<uint32_t>(offsetof(Instance, position_y)));
+                    vertex_attribute_descs.emplace_back(start_index++, 1, VK_FORMAT_R16_SFLOAT, static_cast<uint32_t>(offsetof(Instance, position_z)));
+                    vertex_attribute_descs.emplace_back(start_index++, 1, VK_FORMAT_R16_UINT,   static_cast<uint32_t>(offsetof(Instance, normal_oct)));
+                    vertex_attribute_descs.emplace_back(start_index++, 1, VK_FORMAT_R8_UINT,    static_cast<uint32_t>(offsetof(Instance, yaw_packed)));
+                    vertex_attribute_descs.emplace_back(start_index++, 1, VK_FORMAT_R8_UINT,    static_cast<uint32_t>(offsetof(Instance, scale_packed)));
                 }
             }
             // vertex input state
@@ -477,6 +480,51 @@ namespace spartan
                     RHI_Device::SetResourceName(static_cast<void*>(m_rhi_resource), RHI_Resource_Type::Pipeline, pipeline_state.name);
                 }
             }
+        }
+        else if (pipeline_state.IsRayTracing())
+        {
+            // load extension func once
+            static PFN_vkCreateRayTracingPipelinesKHR pfn_vk_create_ray_tracing_pipelines_khr = nullptr;
+            if (!pfn_vk_create_ray_tracing_pipelines_khr)
+            {
+                pfn_vk_create_ray_tracing_pipelines_khr = (PFN_vkCreateRayTracingPipelinesKHR)vkGetDeviceProcAddr(RHI_Context::device, "vkCreateRayTracingPipelinesKHR");
+                SP_ASSERT(pfn_vk_create_ray_tracing_pipelines_khr != nullptr);
+            }
+
+            // simple setup: raygen, miss, closest hit
+            vector<VkRayTracingShaderGroupCreateInfoKHR> groups(3);
+            groups[0].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+            groups[0].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+            groups[0].generalShader      = 0; // raygen index in stages
+            groups[0].closestHitShader   = VK_SHADER_UNUSED_KHR;
+            groups[0].anyHitShader       = VK_SHADER_UNUSED_KHR;
+            groups[0].intersectionShader = VK_SHADER_UNUSED_KHR;
+
+            groups[1].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+            groups[1].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+            groups[1].generalShader      = 1; // miss index
+            groups[1].closestHitShader   = VK_SHADER_UNUSED_KHR;
+            groups[1].anyHitShader       = VK_SHADER_UNUSED_KHR;
+            groups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
+
+            groups[2].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+            groups[2].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+            groups[2].generalShader      = VK_SHADER_UNUSED_KHR;
+            groups[2].closestHitShader   = 2; // closest hit index
+            groups[2].anyHitShader       = VK_SHADER_UNUSED_KHR;
+            groups[2].intersectionShader = VK_SHADER_UNUSED_KHR;
+
+            VkRayTracingPipelineCreateInfoKHR pipeline_info = {};
+            pipeline_info.sType                             = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
+            pipeline_info.stageCount                        = static_cast<uint32_t>(shader_stages.size());
+            pipeline_info.pStages                           = shader_stages.data();
+            pipeline_info.groupCount                        = static_cast<uint32_t>(groups.size());
+            pipeline_info.pGroups                           = groups.data();
+            pipeline_info.maxPipelineRayRecursionDepth      = 1; // number of bounces
+            pipeline_info.layout                            = static_cast<VkPipelineLayout>(m_rhi_resource_layout);
+
+            SP_ASSERT_VK(pfn_vk_create_ray_tracing_pipelines_khr(RHI_Context::device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, reinterpret_cast<VkPipeline*>(&m_rhi_resource)));
+            RHI_Device::SetResourceName(static_cast<void*>(m_rhi_resource), RHI_Resource_Type::Pipeline, pipeline_state.name);
         }
 
         SP_ASSERT(m_rhi_resource != nullptr);

@@ -100,7 +100,7 @@ void main_cs(uint3 thread_id : SV_DispatchThreadID)
             {
                 L_shadow = compute_shadow(surface, light);
 
-                if (light.has_shadows_screen_space())
+                if (light.has_shadows_screen_space() && surface.is_opaque())
                 {
                     L_shadow = min(L_shadow, tex_uav_sss[int3(thread_id.xy, light.screen_space_shadows_slice_index)].x);
                 }
@@ -163,8 +163,8 @@ void main_cs(uint3 thread_id : SV_DispatchThreadID)
         out_volumetric += write_volumetric;
     }
 
-    tex_uav[thread_id.xy]  = float4(out_diffuse,    0.0f);
-    tex_uav2[thread_id.xy] = float4(out_specular,   0.0f);
-    tex_uav3[thread_id.xy] = out_shadow;
-    tex_uav4[thread_id.xy] = float4(out_volumetric, 1.0f);
+    tex_uav[thread_id.xy]  = validate_output(float4(out_diffuse,    1.0f));
+    tex_uav2[thread_id.xy] = validate_output(float4(out_specular,   1.0f));
+    tex_uav3[thread_id.xy] = validate_output(out_shadow);
+    tex_uav4[thread_id.xy] = validate_output(float4(out_volumetric, 1.0f));
 }

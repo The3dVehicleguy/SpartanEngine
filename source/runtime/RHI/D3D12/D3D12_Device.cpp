@@ -302,12 +302,15 @@ namespace spartan
 
     }
 
-    class RHI_DescriptorSet
-    {
-    };
+    class RHI_DescriptorSet{};
     unordered_map<uint64_t, RHI_DescriptorSet>& RHI_Device::GetDescriptorSets()
     {
         static unordered_map<uint64_t, RHI_DescriptorSet> descriptors;
         return descriptors;
+    }
+
+    uint64_t RHI_Device::GetBufferDeviceAddress(void* buffer)
+    {
+        return 0;
     }
 }

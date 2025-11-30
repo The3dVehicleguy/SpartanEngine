@@ -62,6 +62,25 @@ namespace
 
         return nullptr;
     }
+    
+    uint32_t get_selected_entity_count()
+    {
+        if (Camera* camera = World::GetCamera())
+        {
+            return camera->GetSelectedEntityCount();
+        }
+        return 0;
+    }
+    
+    const std::vector<Entity*>& get_selected_entities()
+    {
+        static std::vector<Entity*> empty;
+        if (Camera* camera = World::GetCamera())
+        {
+            return camera->GetSelectedEntities();
+        }
+        return empty;
+    }
 
     void component_context_menu_options(const string& id, Component* component, const bool removable)
     {
@@ -98,11 +117,11 @@ namespace
         }
     }
 
-    bool component_begin(const string& name, Component* component_instance, bool options = true, const bool removable = true)
+    bool component_begin(const char* name, Component* component_instance, bool options = true, const bool removable = true)
     {
         // draw header first so we get its screen rect
         ImGui::PushFont(Editor::font_bold);
-        const bool collapsed = ImGuiSp::collapsing_header(name.c_str(), ImGuiTreeNodeFlags_AllowOverlap | ImGuiTreeNodeFlags_DefaultOpen);
+        const bool collapsed = ImGuiSp::collapsing_header(name, ImGuiTreeNodeFlags_AllowOverlap | ImGuiTreeNodeFlags_DefaultOpen);
         ImGui::PopFont();
     
         if (options)
@@ -162,7 +181,25 @@ void Properties::OnTickVisible()
     {
         ImGui::PushItemWidth(item_width);
         {
-            if (Entity* entity = get_selected_entity())
+            uint32_t selected_count = get_selected_entity_count();
+            
+            if (selected_count > 1)
+            {
+                // multiple entities selected
+                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.2f, 1.0f), "%d entities selected", selected_count);
+                ImGui::Separator();
+                
+                // list the selected entities
+                const auto& selected = get_selected_entities();
+                for (Entity* entity : selected)
+                {
+                    if (entity)
+                    {
+                        ImGui::BulletText("%s", entity->GetObjectName().c_str());
+                    }
+                }
+            }
+            else if (Entity* entity = get_selected_entity())
             {
                 Renderable* renderable = entity->GetComponent<Renderable>();
                 Material* material     = renderable ? renderable->GetMaterial() : nullptr;
@@ -215,17 +252,10 @@ void Properties::ShowEntity(Entity* entity) const
             entity->SetActive(is_active);
         }
 
-        // global toggle for world/local space
-        bool use_world_space = Editor::GetWorldSpaceTransforms();
-        if (ImGui::Checkbox("World Space", &use_world_space))
-        {
-            Editor::SetWorldSpaceTransforms(use_world_space);
-        }
-
         // reflect transforms based on mode
-        Vector3 position    = use_world_space ? entity->GetPosition() : entity->GetPositionLocal();
-        Quaternion rotation = use_world_space ? entity->GetRotation() : entity->GetRotationLocal();
-        Vector3 scale       = use_world_space ? entity->GetScale()    : entity->GetScaleLocal();
+        Vector3 position    = entity->GetPositionLocal();
+        Quaternion rotation = entity->GetRotationLocal();
+        Vector3 scale       = entity->GetScaleLocal();
 
         // per-entity tracking for euler angles
         static std::unordered_map<uintptr_t, Vector3> last_euler_map;
@@ -266,29 +296,13 @@ void Properties::ShowEntity(Entity* entity) const
         last_frame_euler            = current_euler;
         Quaternion delta_quaternion = Quaternion::FromEulerAngles(delta_euler);
         Quaternion new_rotation;
-        if (use_world_space)
-        {
-            new_rotation = delta_quaternion * rotation; // world space: pre-multiply
-        }
-        else
-        {
-            new_rotation = rotation * delta_quaternion; // local space: post-multiply
-        }
+        new_rotation = rotation * delta_quaternion;
         new_rotation.Normalize();
 
         // apply transforms based on mode
-        if (use_world_space)
-        {
-            entity->SetPosition(position);
-            entity->SetRotation(new_rotation);
-            entity->SetScale(scale);
-        }
-        else
-        {
-            entity->SetPositionLocal(position);
-            entity->SetRotationLocal(new_rotation);
-            entity->SetScaleLocal(scale);
-        }
+        entity->SetPositionLocal(position);
+        entity->SetRotationLocal(new_rotation);
+        entity->SetScaleLocal(scale);
     }
     component_end();
 }
@@ -444,15 +458,15 @@ void Properties::ShowRenderable(spartan::Renderable* renderable) const
 
     if (component_begin("Renderable", renderable))
     {
-        //= REFLECT =======================================================================
-        string name_mesh              = renderable->GetMeshName();
-        Material* material            = renderable->GetMaterial();
-        uint32_t instance_count       = renderable->GetInstanceCount();
-        uint32_t instance_group_count = renderable->GetInstanceGroupCount();
-        string name_material          = material ? material->GetObjectName() : "N/A";
-        bool cast_shadows             = renderable->HasFlag(RenderableFlags::CastsShadows);
-        bool is_visible               = renderable->IsVisible();
-        //=================================================================================
+        //= REFLECT ========================================================================================================
+        string& name_mesh                 = const_cast<string&>(renderable->GetMeshName());
+        Material* material                = renderable->GetMaterial();
+        uint32_t instance_count           = renderable->GetInstanceCount();
+        static string name_material_empty = "N/A";
+        string& name_material             = material ? const_cast<string&>(material->GetObjectName()) : name_material_empty;
+        bool cast_shadows                 = renderable->HasFlag(RenderableFlags::CastsShadows);
+        bool is_visible                   = renderable->IsVisible();
+        //==================================================================================================================
 
         // mesh
         ImGui::Text("Mesh");
@@ -467,23 +481,27 @@ void Properties::ShowRenderable(spartan::Renderable* renderable) const
             int lod_count = renderable->GetLodCount();
             if (ImGui::BeginTable("##geometry_table", lod_count + 1, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit))
             {
+                char lod_name[16];
+
                 // setup columns
-                ImGui::TableSetupColumn("");  // first column for labels
-                for (int i = 0; i < lod_count; i++)
+                ImGui::TableSetupColumn(""); // first column for labels
+                for (int i = 0; i < lod_count; ++i)
                 {
-                    ImGui::TableSetupColumn(("LOD " + to_string(i + 1)).c_str());  // start numbering from 1
+                    std::snprintf(lod_name, sizeof(lod_name), "LOD %d", i + 1);
+                    ImGui::TableSetupColumn(lod_name);
                 }
-        
+                
                 // header row
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 ImGui::Text("LODs");
-                for (int i = 0; i < lod_count; i++)
+                for (int i = 0; i < lod_count; ++i)
                 {
                     ImGui::TableSetColumnIndex(i + 1);
-                    ImGui::Text(("LOD " + to_string(i + 1)).c_str());
+                    std::snprintf(lod_name, sizeof(lod_name), "LOD %d", i + 1);
+                    ImGui::Text(lod_name);
                 }
-        
+
                 // row 1: vertices
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
@@ -509,23 +527,66 @@ void Properties::ShowRenderable(spartan::Renderable* renderable) const
 
             // we can print the lod index for each instanceb but it's not needed (so far)
             if (!renderable->HasInstancing())
-            { 
+            {
                 ImGui::Text("Lod Index");
                 ImGui::SameLine(column_pos_x);
-                ImGui::LabelText("##renderable_lod_index", to_string(renderable->GetLodIndex()).c_str(), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_ReadOnly);
+                char lod_buf[16];
+                std::snprintf(lod_buf, sizeof(lod_buf), "%u", renderable->GetLodIndex());
+                ImGui::LabelText("##renderable_lod_index", lod_buf, ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_ReadOnly);
             }
         }
 
         // instancing
-        if (instance_count != 0)
         {
+            // count
             ImGui::Text("Instances");
             ImGui::SameLine(column_pos_x);
-            ImGui::LabelText("##renderable_instance_count", to_string(instance_count).c_str(), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_ReadOnly);
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%u", instance_count);
+            ImGui::LabelText("##renderable_instance_count", buf, ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_ReadOnly);
 
-            ImGui::Text("Instance Groups");
-            ImGui::SameLine(column_pos_x);
-            ImGui::LabelText("##renderable_instance_group_count", to_string(instance_group_count).c_str(), ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_ReadOnly);
+            // position, rotation, scale
+            if (renderable->HasInstancing())
+            {
+                if (ImGui::TreeNode("Instance Transforms"))
+                {
+                    for (uint32_t i = 0; i < renderable->GetInstanceCount(); i++)
+                    {
+                        // TODO: This has to be a reference to be modifiable
+                        Matrix instance = renderable->GetInstance(i, true);
+
+                        ImGui::PushID(static_cast<int>(i));
+
+                        Vector3 pos, scale;
+                        Quaternion rot;
+                        instance.Decompose(scale, rot, pos);
+
+                        Vector3 euler = rot.ToEulerAngles();
+
+                        if (ImGui::TreeNode(("Instance " + to_string(i)).c_str()))
+                        {
+                            if (ImGui::DragFloat3("Position", &pos.x, 0.1f))
+                            {
+                                instance = Matrix::CreateScale(scale) * Matrix::CreateRotation(rot) * Matrix::CreateTranslation(pos);
+                            }
+
+                            if (ImGui::DragFloat3("Rotation", &euler.x, 0.5f))
+                            {
+                                rot      = Quaternion::FromEulerAngles(euler.y, euler.x, euler.z);
+                                instance = Matrix::CreateScale(scale) * Matrix::CreateRotation(rot) * Matrix::CreateTranslation(pos);
+                            }
+
+                            if (ImGui::DragFloat3("Scale", &scale.x, 0.1f))
+                                instance = Matrix::CreateScale(scale) * Matrix::CreateRotation(rot) * Matrix::CreateTranslation(pos);
+
+                            ImGui::TreePop();
+                        }
+
+                        ImGui::PopID();
+                    }
+                    ImGui::TreePop();
+                }
+            }
         }
 
         // draw distance
@@ -844,6 +905,17 @@ void Properties::ShowMaterial(Material* material) const
             ImGui::SameLine(); ImGui::InputFloat("##matOffsetX", &offset.x, 0.01f, 0.1f, "%.2f", ImGuiInputTextFlags_CharsDecimal);
             ImGui::SameLine(); ImGui::Text("Y");
             ImGui::SameLine(); ImGui::InputFloat("##matOffsetY", &offset.y, 0.01f, 0.1f, "%.2f", ImGuiInputTextFlags_CharsDecimal);
+        
+            // inversion
+            bool invert_x = material->GetProperty(MaterialProperty::TextureInvertX) > 0.5f;
+            bool invert_y = material->GetProperty(MaterialProperty::TextureInvertY) > 0.5f;
+            ImGui::Text("Invert");
+            ImGui::SameLine(column_pos_x);
+            ImGui::Checkbox("X##matInvertX", &invert_x);
+            ImGui::SameLine();
+            ImGui::Checkbox("Y##matInvertY", &invert_y);
+            material->SetProperty(MaterialProperty::TextureInvertX, invert_x ? 1.0f : 0.0f);
+            material->SetProperty(MaterialProperty::TextureInvertY, invert_y ? 1.0f : 0.0f);
         }
 
         // rendering
@@ -876,10 +948,15 @@ void Properties::ShowMaterial(Material* material) const
             ImGui::Checkbox("Wind animation", &wind_animation);
             material->SetProperty(MaterialProperty::WindAnimation, wind_animation ? 1.0f : 0.0f);
 
-              // wind animation
+            // wind animation
             bool emissive_from_albedo = material->GetProperty(MaterialProperty::EmissiveFromAlbedo) != 0.0f;
             ImGui::Checkbox("Emissive from albedo", &emissive_from_albedo);
             material->SetProperty(MaterialProperty::EmissiveFromAlbedo, emissive_from_albedo ? 1.0f : 0.0f);
+
+            // world space uv
+            bool world_space_uv = material->GetProperty(MaterialProperty::WorldSpaceUv) != 0.0f;
+            ImGui::Checkbox("World space uv", &world_space_uv);
+            material->SetProperty(MaterialProperty::WorldSpaceUv, world_space_uv ? 1.0f : 0.0f);
         }
 
         //= MAP ===============================================================================
@@ -981,9 +1058,9 @@ void Properties::ShowTerrain(Terrain* terrain) const
         {
             ImGui::Text("Height Map");
 
-            ImGuiSp::image_slot(terrain->GetHeightMap(), [&terrain](spartan::RHI_Texture* texture)
+            ImGuiSp::image_slot(terrain->GetHeightMapSeed(), [&terrain](spartan::RHI_Texture* texture)
             {
-                terrain->SetHeightMap(texture);
+                terrain->SetHeightMapSeed(texture);
             });
 
             if (ImGuiSp::button("Generate", ImVec2(82.0f * spartan::Window::GetDpiScale(), 0)))
@@ -993,6 +1070,8 @@ void Properties::ShowTerrain(Terrain* terrain) const
                     terrain->Generate();
                 });
             }
+
+            ImGuiSp::image(terrain->GetHeightMapFinal(), ImVec2(100, 100));
         }
         ImGui::EndGroup();
 
