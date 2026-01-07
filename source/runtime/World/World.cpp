@@ -1,5 +1,5 @@
-﻿/*
-Copyright(c) 2015-2025 Panos Karabelas
+/*
+Copyright(c) 2015-2026 Panos Karabelas
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +26,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Game/Game.h"
 #include "../Profiling/Profiler.h"
 #include "../Core/ProgressTracker.h"
+//#include "../Core/ThreadPool.h" // Take a look at later
 #include "Components/Renderable.h"
 #include "Components/Camera.h"
 #include "Components/Light.h"
@@ -51,9 +52,9 @@ namespace spartan
         mutex entity_access_mutex;
         vector<Entity*> pending_add;
         set<uint64_t> pending_remove;
-        uint32_t audio_source_count = 0;
-        bool resolve                = false;
-        bool was_in_editor_mode     = false;
+        uint32_t audio_source_count     = 0;
+        atomic<bool> resolve            = false;
+        bool was_in_editor_mode         = false;
         BoundingBox bounding_box    = BoundingBox::Unit;
         Entity* camera              = nullptr;
         Entity* light               = nullptr;
@@ -266,7 +267,7 @@ namespace spartan
 
         ProcessPendingRemovals();
 
-        // pre-tick
+      
         for (Entity* entity : entities)
         {
             if (entity->GetActive())
@@ -276,14 +277,19 @@ namespace spartan
         }
 
         // tick
-        // tick
         for (Entity* entity : entities)
         {
             if (entity->GetActive())
             {
                 entity->Tick();
+            }
+        }
 
-                // check for entity changes
+        // check for entity changes
+        for (Entity* entity : entities)
+        {
+            if (entity->GetActive())
+            {
                 uint64_t id = entity->GetObjectId();
                 auto it = entity_states.find(id);
                 if (it != entity_states.end())
@@ -391,10 +397,6 @@ namespace spartan
         {
             world_time::tick();
             Game::Tick();
-        }
-        else
-        {
-            Game::EditorTick();
         }
     }
 
@@ -736,5 +738,14 @@ namespace spartan
     float World::GetTimeOfDay(bool use_real_world_time)
     {
         return world_time::get_time_of_day(use_real_world_time);
+    }
+
+    void World::SetTimeOfDay(float time_of_day)
+    {
+        if (time_of_day < 0.0f)
+            time_of_day = 0.0f;
+        else if (time_of_day > 1.0f)
+            time_of_day = 1.0f;
+        world_time::time_of_day = time_of_day;
     }
 }

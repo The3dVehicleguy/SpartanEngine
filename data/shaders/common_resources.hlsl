@@ -1,5 +1,5 @@
 /*
-Copyright(c) 2015-2025 Panos Karabelas
+Copyright(c) 2015-2026 Panos Karabelas
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -58,14 +58,14 @@ struct FrameBufferData
     float camera_last_movement_time;
     float hdr_enabled;
     float hdr_max_nits;
-    float hdr_white_point;
+    float padding;
 
     float3 camera_position_previous;
     float resolution_scale;
     
     double time;
     float camera_fov;
-    float padding;
+    float padding2;
     
     float3 wind;
     float gamma;
@@ -113,7 +113,7 @@ struct MaterialParameters
     bool has_texture_occlusion() { return (flags & (1 << 7))  != 0; }
     bool has_texture_roughness() { return (flags & (1 << 3))  != 0; }
     bool has_texture_metalness() { return (flags & (1 << 4))  != 0; }
-    bool emissive_from_albedo()  { return (flags & (1 << 14)) != 0; }
+    bool emissive_from_albedo()  { return (flags & (1 << 15)) != 0; }
 };
 
 // struct which forms the bindless light parameters array
