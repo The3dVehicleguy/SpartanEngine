@@ -28,6 +28,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Widgets/Viewport.h"
 #include <Rendering/Material.h>
 #include "World/Entity.h"
+#include "World/Prefab.h"
+#include "World/World.h"
 #include "World/Components/Script.h"
 //=========================================
 
@@ -70,74 +72,49 @@ namespace
 
     constexpr std::string_view NewLuaScriptContents = R"(
 
--- ================================================================
--- Spartan Lua Script Prelude
--- ================================================================
--- Lua is a lightweight scripting language for game logic.
--- The Lua API in Spartan mirrors the C++ API:
---   - Functions called in Lua have the same names and return types as C++.
---   - Component queries use enums, e.g.: self:GetComponent(ComponentTypes.Light)
---   - Colon syntax (:) automatically passes 'self'.
---   - Dot syntax (.) accesses fields or tables on self.
---
--- Lua reference: https://www.lua.org/manual/5.4/manual.html
---
--- This is a template script. All functions are empty.
--- ================================================================
+-- Scripting Wiki: https://github.com/PanosK92/SpartanEngine/wiki/Scripting
 
--- Create the script table. Must be returned at the end.
-MyScript = {}
-
--- ================================================================
--- Simulation lifecycle callbacks
--- ================================================================
+MyScript = {
+    -- Values here will be exposed to component details.
+    -- bMyValue = true,
+    -- MyString = "Hello, World!",
+}
 
 -- Called once when the simulation starts.
-function MyScript:Start()
+function MyScript:Start(Entity)
     -- Place initialization logic here
 end
 
 -- Called once when the simulation stops.
-function MyScript:Stop()
+function MyScript:Stop(Entity)
     -- Place shutdown logic here
 end
 
 -- Called when the script component is removed from the entity.
-function MyScript:Remove()
+function MyScript:Remove(Entity)
     -- Cleanup logic here
 end
 
--- ================================================================
--- Per-frame callbacks
--- ================================================================
-
 -- Called every frame before Tick. Useful to reset temporary states.
-function MyScript:PreTick()
+function MyScript:PreTick(Entity)
     -- Pre-update logic here
 end
 
 -- Called every frame. Main update function.
-function MyScript:Tick()
+function MyScript:Tick(Entity)
     -- Frame update logic here
 end
 
--- ================================================================
--- Serialization callbacks
--- ================================================================
-
 -- Called when the entity is being saved.
-function MyScript:Save()
+function MyScript:Save(Entity)
     -- Return a table with any custom data to save
 end
 
 -- Called when the entity is being loaded.
-function MyScript:Load(data)
+function MyScript:Load(Entity)
     -- Restore data from the table returned by Save
 end
 
--- ================================================================
--- Return the script table to Spartan
--- ================================================================
 return MyScript
 )";
 
@@ -619,6 +596,32 @@ void FileDialog::ShowMiddle()
     }
     ImGui::EndChild();
 
+    // drop target for entities dragged from the world hierarchy - saves as a .prefab file
+    if (m_type == FileDialog_Type_Browser)
+    {
+        if (ImGui::BeginDragDropTarget())
+        {
+            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ENTITY"))
+            {
+                if (payload->DataSize == sizeof(uint64_t))
+                {
+                    const uint64_t entity_id = *(const uint64_t*)payload->Data;
+                    if (Entity* entity = World::GetEntityById(entity_id))
+                    {
+                        // save the entity as a .prefab file in the current browser directory
+                        string prefab_path = m_current_path + "/" + entity->GetObjectName() + ".prefab";
+                        if (Prefab::SaveToFile(entity, prefab_path))
+                        {
+                            entity->SetPrefabFilePath(prefab_path);
+                            m_is_dirty = true;
+                        }
+                    }
+                }
+            }
+            ImGui::EndDragDropTarget();
+        }
+    }
+
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 }
@@ -1026,11 +1029,12 @@ void FileDialog::ItemDrag(FileDialogItem* item) const
         const string& path_full     = item->GetPath();
         const string& path_relative = item->GetPathRelative();
 
-        if (FileSystem::IsSupportedModelFile(path_full)) { set_payload(ImGuiSp::DragPayloadType::Model,    path_full, path_relative); }
-        if (FileSystem::IsSupportedImageFile(path_full)) { set_payload(ImGuiSp::DragPayloadType::Texture,  path_full, path_relative); }
-        if (FileSystem::IsSupportedAudioFile(path_full)) { set_payload(ImGuiSp::DragPayloadType::Audio,    path_full, path_relative); }
-        if (FileSystem::IsEngineMaterialFile(path_full)) { set_payload(ImGuiSp::DragPayloadType::Material, path_full, path_relative); }
-        if (FileSystem::IsEngineLuaFile(path_full))      { set_payload(ImGuiSp::DragPayloadType::Lua,      path_full, path_relative); }
+        if (FileSystem::IsSupportedModelFile(path_full))  { set_payload(ImGuiSp::DragPayloadType::Model,    path_full, path_relative); }
+        if (FileSystem::IsSupportedImageFile(path_full))  { set_payload(ImGuiSp::DragPayloadType::Texture,  path_full, path_relative); }
+        if (FileSystem::IsSupportedAudioFile(path_full))  { set_payload(ImGuiSp::DragPayloadType::Audio,    path_full, path_relative); }
+        if (FileSystem::IsEngineMaterialFile(path_full))  { set_payload(ImGuiSp::DragPayloadType::Material, path_full, path_relative); }
+        if (FileSystem::IsEngineLuaFile(path_full))       { set_payload(ImGuiSp::DragPayloadType::Lua,      path_full, path_relative); }
+        if (FileSystem::IsEnginePrefabFile(path_full))    { set_payload(ImGuiSp::DragPayloadType::Prefab,   path_full, path_relative); }
 
         // drag preview
         ImGui::BeginTooltip();
@@ -1187,48 +1191,52 @@ void FileDialog::DialogUpdateFromDirectory(const string& file_path)
 
     if (m_filter == FileDialog_Filter_All)
     {
-        for (const string& file_path : paths_anything)
+        for (const string& path : paths_anything)
         {
-            if (FileSystem::IsSupportedImageFile(file_path))
+            if (FileSystem::IsSupportedImageFile(path))
             {
-                ThreadPool::AddTask([this, file_path]()
+                ThreadPool::AddTask([this, path]()
                 {
-                    auto texture = spartan::ResourceCache::Load<RHI_Texture>(file_path);
+                    auto texture = spartan::ResourceCache::Load<RHI_Texture>(path);
                     if (texture)
                     {
                         texture->PrepareForGpu();
                     }
                     lock_guard<mutex> lock(m_mutex_items);
-                    m_items.emplace_back(file_path, texture.get());
+                    m_items.emplace_back(path, texture.get());
                 });
             }
-            else if (FileSystem::IsSupportedAudioFile(file_path))
+            else if (FileSystem::IsSupportedAudioFile(path))
             {
-                m_items.emplace_back(file_path, spartan::ResourceCache::GetIcon(spartan::IconType::Audio));
+                m_items.emplace_back(path, spartan::ResourceCache::GetIcon(spartan::IconType::Audio));
             }
-            else if (FileSystem::IsSupportedModelFile(file_path))
+            else if (FileSystem::IsSupportedModelFile(path))
             {
-                m_items.emplace_back(file_path, spartan::ResourceCache::GetIcon(spartan::IconType::Model));
+                m_items.emplace_back(path, spartan::ResourceCache::GetIcon(spartan::IconType::Model));
             }
-            else if (FileSystem::IsSupportedFontFile(file_path))
+            else if (FileSystem::IsSupportedFontFile(path))
             {
-                m_items.emplace_back(file_path, spartan::ResourceCache::GetIcon(spartan::IconType::Font));
+                m_items.emplace_back(path, spartan::ResourceCache::GetIcon(spartan::IconType::Font));
             }
-            else if (FileSystem::IsEngineMaterialFile(file_path))
+            else if (FileSystem::IsEngineMaterialFile(path))
             {
-                m_items.emplace_back(file_path, spartan::ResourceCache::GetIcon(spartan::IconType::Material));
+                m_items.emplace_back(path, spartan::ResourceCache::GetIcon(spartan::IconType::Material));
             }
-            else if (FileSystem::IsEngineWorldFile(file_path))
+            else if (FileSystem::IsEnginePrefabFile(path))
             {
-                m_items.emplace_back(file_path, spartan::ResourceCache::GetIcon(spartan::IconType::World));
+                m_items.emplace_back(path, spartan::ResourceCache::GetIcon(spartan::IconType::Entity));
             }
-            else if (FileSystem::GetExtensionFromFilePath(file_path) == ".7z")
+            else if (FileSystem::IsEngineWorldFile(path))
             {
-                m_items.emplace_back(file_path, spartan::ResourceCache::GetIcon(spartan::IconType::Compressed));
+                m_items.emplace_back(path, spartan::ResourceCache::GetIcon(spartan::IconType::World));
+            }
+            else if (FileSystem::GetExtensionFromFilePath(path) == ".7z")
+            {
+                m_items.emplace_back(path, spartan::ResourceCache::GetIcon(spartan::IconType::Compressed));
             }
             else
             {
-                m_items.emplace_back(file_path, spartan::ResourceCache::GetIcon(spartan::IconType::Undefined));
+                m_items.emplace_back(path, spartan::ResourceCache::GetIcon(spartan::IconType::Undefined));
             }
         }
     }

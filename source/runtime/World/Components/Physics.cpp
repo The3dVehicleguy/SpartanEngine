@@ -656,6 +656,19 @@ namespace spartan
             "GetBoostPressure",             &Physics::GetBoostPressure,
             "GetBoostMaxPressure",          &Physics::GetBoostMaxPressure,
 
+            "SetDrsEnabled",                &Physics::SetDrsEnabled,
+            "GetDrsEnabled",                &Physics::GetDrsEnabled,
+            "SetDrsActive",                 &Physics::SetDrsActive,
+            "GetDrsActive",                 &Physics::GetDrsActive,
+
+            "SetDiffType",                  &Physics::SetDiffType,
+            "GetDiffType",                  &Physics::GetDiffType,
+            "GetDiffTypeName",              &Physics::GetDiffTypeName,
+
+            "GetWheelWear",                 &Physics::GetWheelWear,
+            "GetWheelWearGripFactor",       &Physics::GetWheelWearGripFactor,
+            "ResetTireWear",                &Physics::ResetTireWear,
+
             "SetManualTransmission",        &Physics::SetManualTransmission,
             "GetManualTransmission",        &Physics::GetManualTransmission,
             "ShiftUp",                      &Physics::ShiftUp,
@@ -1502,7 +1515,7 @@ namespace spartan
         {
             // calculate correct body height using actual spring stiffness
             float front_mass_per_wheel = car::cfg.mass * 0.40f * 0.5f;
-            float front_omega = 2.0f * math::pi * car::tuning::front_spring_freq;
+            float front_omega = 2.0f * math::pi * car::tuning::spec.front_spring_freq;
             float front_stiffness = front_mass_per_wheel * front_omega * front_omega;
             float front_load = front_mass_per_wheel * 9.81f;
             float expected_sag = std::clamp(front_load / front_stiffness, 0.0f, car::cfg.suspension_travel * 0.8f);
@@ -1775,6 +1788,75 @@ namespace spartan
         if (m_body_type != BodyType::Vehicle)
             return 0.0f;
         return car::get_boost_max_pressure();
+    }
+
+    // drs
+    void Physics::SetDrsEnabled(bool enabled)
+    {
+        if (m_body_type == BodyType::Vehicle)
+            car::set_drs_enabled(enabled);
+    }
+
+    bool Physics::GetDrsEnabled() const
+    {
+        if (m_body_type != BodyType::Vehicle)
+            return false;
+        return car::get_drs_enabled();
+    }
+
+    void Physics::SetDrsActive(bool active)
+    {
+        if (m_body_type == BodyType::Vehicle)
+            car::set_drs_active(active);
+    }
+
+    bool Physics::GetDrsActive() const
+    {
+        if (m_body_type != BodyType::Vehicle)
+            return false;
+        return car::get_drs_active();
+    }
+
+    // differential
+    void Physics::SetDiffType(int type)
+    {
+        if (m_body_type == BodyType::Vehicle)
+            car::set_diff_type(type);
+    }
+
+    int Physics::GetDiffType() const
+    {
+        if (m_body_type != BodyType::Vehicle)
+            return 2;
+        return car::get_diff_type();
+    }
+
+    const char* Physics::GetDiffTypeName() const
+    {
+        if (m_body_type != BodyType::Vehicle)
+            return "N/A";
+        return car::get_diff_type_name();
+    }
+
+    // tire wear
+    float Physics::GetWheelWear(WheelIndex wheel) const
+    {
+        if (m_body_type != BodyType::Vehicle)
+            return 0.0f;
+        return car::get_wheel_wear(static_cast<int>(wheel));
+    }
+
+    float Physics::GetWheelWearGripFactor(WheelIndex wheel) const
+    {
+        if (m_body_type != BodyType::Vehicle)
+            return 1.0f;
+        return car::get_wheel_wear_grip_factor(static_cast<int>(wheel));
+    }
+
+    void Physics::ResetTireWear()
+    {
+        if (m_body_type == BodyType::Vehicle)
+            car::reset_tire_wear();
     }
 
     void Physics::SetManualTransmission(bool enabled)
@@ -2384,6 +2466,40 @@ namespace spartan
                 for (const auto& vertex : vertices)
                 {
                     px_vertices.emplace_back(vertex.pos[0] * scale.x, vertex.pos[1] * scale.y, vertex.pos[2] * scale.z);
+                }
+
+                // remove degenerate triangles (zero/near-zero area) that would cause physx cooking to fail
+                {
+                    const float area_epsilon = 1e-6f;
+                    vector<uint32_t> valid_indices;
+                    valid_indices.reserve(indices.size());
+
+                    for (size_t i = 0; i < indices.size(); i += 3)
+                    {
+                        const PxVec3& v0 = px_vertices[indices[i]];
+                        const PxVec3& v1 = px_vertices[indices[i + 1]];
+                        const PxVec3& v2 = px_vertices[indices[i + 2]];
+
+                        // compute triangle area via cross product
+                        PxVec3 edge1 = v1 - v0;
+                        PxVec3 edge2 = v2 - v0;
+                        float area   = edge1.cross(edge2).magnitude() * 0.5f;
+
+                        if (area > area_epsilon)
+                        {
+                            valid_indices.push_back(indices[i]);
+                            valid_indices.push_back(indices[i + 1]);
+                            valid_indices.push_back(indices[i + 2]);
+                        }
+                    }
+
+                    indices = move(valid_indices);
+                }
+
+                if (indices.empty())
+                {
+                    SP_LOG_WARNING("Mesh '%s' has no valid triangles after degenerate removal, skipping physics", GetEntity()->GetObjectName().c_str());
+                    return;
                 }
 
                 // cooking parameters
