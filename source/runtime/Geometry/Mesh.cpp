@@ -27,6 +27,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI/RHI_AccelerationStructure.h"
 #include "../World/Entity.h"
 #include "../Resource/Import/ModelImporter.h"
+#include "../Rendering/GeometryBuffer.h"
 #include "GeometryProcessing.h"
 //===========================================
 
@@ -44,8 +45,18 @@ namespace spartan
 
     Mesh::~Mesh()
     {
-        m_index_buffer  = nullptr;
-        m_vertex_buffer = nullptr;
+
+    }
+
+    void Mesh::RegisterForScripting(sol::state_view State)
+    {
+        State.new_usertype<Mesh>("Mesh",
+            "SaveToFile",               &Mesh::SaveToFile,
+            "LoadFromFile",             &Mesh::LoadFromFile,
+            "Clear",                    &Mesh::Clear,
+            "GetVertexCount",           &Mesh::GetVertexCount,
+            "GetIndexCount",            &Mesh::GetIndexCount
+            );
     }
 
     void Mesh::Clear()
@@ -72,8 +83,9 @@ namespace spartan
         uint32_t type = static_cast<uint32_t>(m_type);
         outfile.write(reinterpret_cast<const char*>(&type), sizeof(uint32_t));
 
-        uint32_t dropoff = static_cast<uint32_t>(m_lod_dropoff);
-        outfile.write(reinterpret_cast<const char*>(&dropoff), sizeof(uint32_t));
+        // legacy field for backward compatibility (previously stored lod curve type)
+        uint32_t legacy_field = 0;
+        outfile.write(reinterpret_cast<const char*>(&legacy_field), sizeof(uint32_t));
 
         outfile.write(reinterpret_cast<const char*>(&m_flags), sizeof(uint32_t));
 
@@ -148,9 +160,9 @@ namespace spartan
             infile.read(reinterpret_cast<char*>(&type), sizeof(uint32_t));
             m_type = static_cast<MeshType>(type);
 
-            uint32_t dropoff;
-            infile.read(reinterpret_cast<char*>(&dropoff), sizeof(uint32_t));
-            m_lod_dropoff = static_cast<MeshLodDropoff>(dropoff);
+            // legacy field for backward compatibility (skip)
+            uint32_t legacy_field;
+            infile.read(reinterpret_cast<char*>(&legacy_field), sizeof(uint32_t));
 
             infile.read(reinterpret_cast<char*>(&m_flags), sizeof(uint32_t));
 
@@ -206,11 +218,8 @@ namespace spartan
         }
 
         // compute memory usage
-        if (m_vertex_buffer && m_index_buffer)
-        {
-            m_object_size = m_vertex_buffer->GetObjectSize();
-            m_object_size += m_index_buffer->GetObjectSize();
-        }
+        m_object_size  = m_vertices.size() * sizeof(RHI_Vertex_PosTexNorTan);
+        m_object_size += m_indices.size() * sizeof(uint32_t);
 
         SP_LOG_INFO("Loading \"%s\" took %d ms", FileSystem::GetFileNameFromFilePath(file_path).c_str(), static_cast<int>(timer.GetElapsedTimeMs()));
     }
@@ -227,7 +236,7 @@ namespace spartan
     void Mesh::GetGeometry(uint32_t sub_mesh_index, vector<uint32_t>* indices, vector<RHI_Vertex_PosTexNorTan>* vertices)
     {
         SP_ASSERT_MSG(indices != nullptr || vertices != nullptr, "Indices and vertices vectors can't both be null");
-    
+
         // validate sub-mesh index
         if (sub_mesh_index >= m_sub_meshes.size())
         {
@@ -243,21 +252,21 @@ namespace spartan
         }
 
         const MeshLod& lod = sub_mesh.lods[0];
-    
+
         if (indices)
         {
             SP_ASSERT_MSG(lod.index_count != 0, "Index count can't be 0");
-    
+
             indices->resize(lod.index_count); // allocate once (caller can reuse buffer)
             copy(m_indices.begin() + lod.index_offset,
                       m_indices.begin() + lod.index_offset + lod.index_count,
                       indices->begin());
         }
-    
+
         if (vertices)
         {
             SP_ASSERT_MSG(lod.vertex_count != 0, "Vertex count can't be 0");
-    
+
             vertices->resize(lod.vertex_count); // allocate once (caller can reuse buffer)
             copy(m_vertices.begin() + lod.vertex_offset,
                       m_vertices.begin() + lod.vertex_offset + lod.vertex_count,
@@ -307,61 +316,66 @@ namespace spartan
             AddLod(vertices, indices, current_sub_mesh_index);
         }
 
-        // generate additional lod if requested
+        // generate additional lods if requested
         if (generate_lods && (m_flags & static_cast<uint32_t>(MeshFlags::PostProcessGenerateLods)))
         {
-            // store the original index count (for reference, but we'll base targets on previous lod)
+            // screen coverage thresholds from renderable::update_lod_indices()
+            // these define at what screen fraction each lod becomes active
+            // lod generation targets are derived directly from these to ensure
+            // simplification is matched to runtime selection - the user should never
+            // see low quality geometry up close, yet we render minimum triangles
+            static constexpr array<float, mesh_lod_count> screen_thresholds =
+            {
+                0.05f,   // lod0: object covers >= 5% of screen height
+                0.025f,  // lod1: object covers >= 2.5%
+                0.012f,  // lod2: object covers >= 1.2%
+                0.006f,  // lod3: object covers >= 0.6%
+                0.003f   // lod4: object covers >= 0.3%
+            };
+
             size_t original_index_count = indices.size();
-            
-            // start with the original geometry for lod 1 onwards
+
+            // start with lod0 geometry for progressive simplification
             vector<RHI_Vertex_PosTexNorTan> prev_vertices = vertices;
             vector<uint32_t> prev_indices                 = indices;
-            
+
             for (uint32_t lod_level = 1; lod_level < mesh_lod_count; lod_level++)
             {
-                // use the previous lod's geometry for simplification
+                // use previous lod as starting point for simplification
                 vector<RHI_Vertex_PosTexNorTan> lod_vertices = prev_vertices;
                 vector<uint32_t> lod_indices                 = prev_indices;
-            
-                // only simplify if the geometry is complex enough
-                if (lod_indices.size() > 64)
-                {
-                    // compute target fraction based on LOD level
-                    float t = static_cast<float>(lod_level) / static_cast<float>(mesh_lod_count);
-                    if (m_lod_dropoff == MeshLodDropoff::Exponential)
-                    {
-                        t = pow(t, 2.0f);
-                    }
-                    else if (m_lod_dropoff == MeshLodDropoff::Aggressive)
-                    {
-                        t = pow(t, 0.4f); // fast start, slow end - more aggressive early
-                    }
-                    float target_fraction = max(0.1f, 1.0f - t); // retain at least 10% to avoid over-reduction
 
-                    // compute target index count based on the previous lod's actual index count
-                    size_t target_index_count = max(static_cast<size_t>(64), static_cast<size_t>(prev_indices.size() * target_fraction));
-            
-                    // simplify geometry
-                    bool preserve_uvs   = true;
-                    bool preserve_edges = m_flags & static_cast<uint32_t>(MeshFlags::PostProcessPreserveTerrainEdges);
-                    geometry_processing::simplify(lod_indices, lod_vertices, target_index_count, preserve_uvs, preserve_edges);
-            
-                    // check if simplification reduced the index count; if not, stop
-                    if (lod_indices.size() >= prev_indices.size())
-                        break;
-            
-                    // add the simplified geometry as a new lod
-                    AddLod(lod_vertices, lod_indices, current_sub_mesh_index);
-            
-                    // update previous geometry for the next iteration
-                    prev_vertices = move(lod_vertices);
-                    prev_indices  = move(lod_indices);
-                }
-                else
-                {
-                    // If too simple to simplify further, stop generating LODs
+                // geometry too simple to benefit from further simplification
+                if (lod_indices.size() <= 64)
                     break;
-                }
+
+                // compute optimal simplification target from screen coverage ratio
+                // since visible detail scales with screen coverage, and we want
+                // imperceptible quality loss, we use: target = coverage / base_coverage
+                // this gives ~2x reduction per lod, matching the ~2x screen size steps
+                float coverage      = screen_thresholds[lod_level];
+                float base_coverage = screen_thresholds[0];
+                float target_ratio  = coverage / base_coverage;
+
+                // apply target relative to original mesh (not previous lod)
+                // this ensures consistent quality targets regardless of actual achieved reduction
+                size_t target_index_count = max(static_cast<size_t>(64), static_cast<size_t>(original_index_count * target_ratio));
+
+                // simplify geometry
+                bool preserve_uvs   = true;
+                bool preserve_edges = m_flags & static_cast<uint32_t>(MeshFlags::PostProcessPreserveTerrainEdges);
+                geometry_processing::simplify(lod_indices, lod_vertices, target_index_count, preserve_uvs, preserve_edges);
+
+                // stop if simplification couldn't reduce complexity further
+                if (lod_indices.size() >= prev_indices.size())
+                    break;
+
+                // add simplified geometry as new lod
+                AddLod(lod_vertices, lod_indices, current_sub_mesh_index);
+
+                // update for next iteration
+                prev_vertices = move(lod_vertices);
+                prev_indices  = move(lod_indices);
             }
         }
 
@@ -393,23 +407,9 @@ namespace spartan
 
     void Mesh::CreateGpuBuffers()
     {
-        // vertex buffer
-        m_vertex_buffer = make_unique<RHI_Buffer>(RHI_Buffer_Type::Vertex,
-            sizeof(m_vertices[0]),
-            static_cast<uint32_t>(m_vertices.size()),
-            static_cast<void*>(&m_vertices[0]),
-            false,
-            (string("mesh_vertex_buffer_") + m_object_name).c_str()
-        );
-
-        // index buffer
-        m_index_buffer = make_unique<RHI_Buffer>(RHI_Buffer_Type::Index,
-            sizeof(m_indices[0]),
-            static_cast<uint32_t>(m_indices.size()),
-            static_cast<void*>(&m_indices[0]),
-            false,
-            (string("mesh_index_buffer_") + m_object_name).c_str()
-        );
+        // append this mesh's geometry into the global vertex/index buffers
+        m_global_vertex_offset = GeometryBuffer::AppendVertices(m_vertices.data(), static_cast<uint32_t>(m_vertices.size()));
+        m_global_index_offset  = GeometryBuffer::AppendIndices(m_indices.data(), static_cast<uint32_t>(m_indices.size()));
 
         // normalize scale
         if (m_flags & static_cast<uint32_t>(MeshFlags::PostProcessNormalizeScale))
@@ -424,6 +424,16 @@ namespace spartan
         }
     }
 
+    RHI_Buffer* Mesh::GetVertexBuffer()
+    {
+        return GeometryBuffer::GetVertexBuffer();
+    }
+
+    RHI_Buffer* Mesh::GetIndexBuffer()
+    {
+        return GeometryBuffer::GetIndexBuffer();
+    }
+
     void Mesh::BuildAccelerationStructure(RHI_CommandList* cmd_list)
     {
         SP_ASSERT(RHI_Device::IsSupportedRayTracing());
@@ -432,14 +442,19 @@ namespace spartan
         if (m_sub_meshes.empty())
             return;
 
+        // the global geometry buffer must be built before acceleration structures
+        RHI_Buffer* vertex_buffer = GeometryBuffer::GetVertexBuffer();
+        RHI_Buffer* index_buffer  = GeometryBuffer::GetIndexBuffer();
+        if (!vertex_buffer || !index_buffer)
+            return;
+
         // resize blas vector to match sub-mesh count if needed
         if (m_blas.size() != m_sub_meshes.size())
         {
             m_blas.resize(m_sub_meshes.size());
         }
 
-        // build one blas per sub-mesh - this ensures each tlas instance only contains
-        // its own geometry, fixing issues where shared blas caused wrong geometry hits
+        // build one blas per sub-mesh
         for (uint32_t i = 0; i < static_cast<uint32_t>(m_sub_meshes.size()); i++)
         {
             // skip if already built
@@ -448,15 +463,19 @@ namespace spartan
 
             const auto& lod = m_sub_meshes[i].lods[0]; // use lod 0 for blas
 
-            // create geometry for this sub-mesh
+            // compute global offsets: mesh base offset + lod-relative offset
+            uint32_t global_vertex_offset = m_global_vertex_offset + lod.vertex_offset;
+            uint32_t global_index_offset  = m_global_index_offset + lod.index_offset;
+
+            // create geometry for this sub-mesh using global buffer addresses
             RHI_AccelerationStructureGeometry geo;
             geo.transparent           = false;
             geo.vertex_format         = RHI_Format::R32G32B32_Float; // positions
-            geo.vertex_buffer_address = RHI_Device::GetBufferDeviceAddress(m_vertex_buffer->GetRhiResource()) + lod.vertex_offset * m_vertex_buffer->GetStride();
-            geo.vertex_stride         = m_vertex_buffer->GetStride();
+            geo.vertex_buffer_address = RHI_Device::GetBufferDeviceAddress(vertex_buffer->GetRhiResource()) + global_vertex_offset * vertex_buffer->GetStride();
+            geo.vertex_stride         = vertex_buffer->GetStride();
             geo.max_vertex            = lod.vertex_count - 1;
             geo.index_format          = RHI_Format::R32_Uint;
-            geo.index_buffer_address  = RHI_Device::GetBufferDeviceAddress(m_index_buffer->GetRhiResource()) + lod.index_offset * sizeof(uint32_t);
+            geo.index_buffer_address  = RHI_Device::GetBufferDeviceAddress(index_buffer->GetRhiResource()) + global_index_offset * sizeof(uint32_t);
 
             vector<RHI_AccelerationStructureGeometry> geometries = { geo };
             vector<uint32_t> primitive_counts                    = { lod.index_count / 3 };

@@ -34,10 +34,10 @@ struct gbuffer
 static const float3 vegetation_greener  = float3(0.05f, 0.4f, 0.03f);
 static const float3 vegetation_yellower = float3(0.45f, 0.4f, 0.15f);
 static const float3 vegetation_browner  = float3(0.3f, 0.15f, 0.08f);
-static const float3 grass_base          = float3(0.05f, 0.07f, 0.03f);
-static const float3 grass_tip           = float3(0.08f, 0.12f, 0.04f);
-static const float3 grass_var1          = float3(0.07f, 0.08f, 0.03f);
-static const float3 grass_var2          = float3(0.06f, 0.05f, 0.02f);
+static const float3 grass_base          = float3(0.03f, 0.055f, 0.02f);
+static const float3 grass_tip           = float3(0.05f, 0.09f, 0.03f);
+static const float3 grass_var1          = float3(0.04f, 0.065f, 0.02f);
+static const float3 grass_var2          = float3(0.035f, 0.04f, 0.015f);
 static const float3 flower_base         = float3(0.05f, 0.07f, 0.03f);
 static const float3 flower_blue         = float3(0.529f, 0.808f, 0.922f);
 static const float3 flower_red          = float3(0.8f, 0.2f, 0.2f);
@@ -112,16 +112,28 @@ float3 compute_flower_color(float height_percent, uint instance_id)
     return lerp(flower_base, tip, smoothstep(0.2f, 1.0f, height_percent));
 }
 
+#ifdef INDIRECT_DRAW
+gbuffer_vertex main_vs(Vertex_PosUvNorTan input, uint instance_id : SV_InstanceID, [[vk::builtin("DrawIndex")]] uint draw_id : DRAW_INDEX)
+{
+    _draw = indirect_draw_data_out[draw_id];
+#else
 gbuffer_vertex main_vs(Vertex_PosUvNorTan input, uint instance_id : SV_InstanceID)
 {
+    _draw = draw_data[buffer_pass.draw_index];
+#endif
+
     float3 position_world          = 0.0f;
     float3 position_world_previous = 0.0f;
-    gbuffer_vertex vertex          = transform_to_world_space(input, instance_id, buffer_pass.transform, position_world, position_world_previous);
+    gbuffer_vertex vertex          = transform_to_world_space(input, instance_id, _draw.transform, position_world, position_world_previous);
+    vertex.material_index          = _draw.material_index;
     return transform_to_clip_space(vertex, position_world, position_world_previous);
 }
 
 gbuffer main_ps(gbuffer_vertex vertex, bool is_front_face : SV_IsFrontFace)
 {
+    // restore material index from vertex output (works for both indirect and cpu-driven draws)
+    pass_load_draw_data_from_vertex(vertex.material_index);
+
     // material setup
     MaterialParameters material = GetMaterial();
     Surface surface;

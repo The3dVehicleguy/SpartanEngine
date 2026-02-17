@@ -105,6 +105,12 @@ void main_cs(uint3 thread_id : SV_DispatchThreadID)
         specular_ibl *= 0.0f; // fully handled by ray traced reflections
     }
 
+    // when restir path tracing is enabled, nearly disable ibl diffuse as restir fully replaces it
+    if (is_restir_pt_enabled())
+    {
+        diffuse_ibl *= 0.0f; // restir fully handles indirect diffuse
+    }
+
     // combine ibl
     float3 ibl  = diffuse_ibl + specular_ibl;
     ibl        *= surface.alpha;

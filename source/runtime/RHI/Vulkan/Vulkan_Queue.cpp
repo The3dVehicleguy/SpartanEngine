@@ -27,6 +27,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_SyncPrimitive.h"
 #include "../RHI_VendorTechnology.h"
 #include "../Core/Debugging.h"
+#include "../Core/Breadcrumbs.h"
 //==================================
 
 //= NAMESPACES =====
@@ -142,20 +143,32 @@ namespace spartan
         SP_ASSERT_VK(vkQueueWaitIdle(static_cast<VkQueue>(RHI_Device::GetQueueRhiResource(m_type))));
     }
 
-    void RHI_Queue::Submit(void* cmd_buffer, const uint32_t wait_flags, RHI_SyncPrimitive* semaphore_wait, RHI_SyncPrimitive* semaphore_signal, RHI_SyncPrimitive* semaphore_timeline_signal)
+    void RHI_Queue::Submit(
+        void* cmd_buffer, const uint32_t wait_flags,
+        RHI_SyncPrimitive* semaphore_wait, RHI_SyncPrimitive* semaphore_signal, RHI_SyncPrimitive* semaphore_timeline_signal,
+        RHI_SyncPrimitive* semaphore_timeline_wait, uint64_t timeline_wait_value
+    )
     {
         lock_guard<mutex> lock(get_mutex(this));
     
-        // wait semaphore setup
-        VkSemaphoreSubmitInfo semaphores_list_wait[1] = {};
+        // wait semaphore setup (binary + optional timeline)
+        VkSemaphoreSubmitInfo semaphores_list_wait[2] = {};
         uint32_t wait_semaphore_count = 0;
         if (semaphore_wait)
         {
-            semaphores_list_wait[0].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR;
-            semaphores_list_wait[0].semaphore = static_cast<VkSemaphore>(semaphore_wait->GetRhiResource());
-            semaphores_list_wait[0].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR;
-            semaphores_list_wait[0].value     = 0; // ignored for binary semaphores
-            wait_semaphore_count = 1;
+            semaphores_list_wait[wait_semaphore_count].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR;
+            semaphores_list_wait[wait_semaphore_count].semaphore = static_cast<VkSemaphore>(semaphore_wait->GetRhiResource());
+            semaphores_list_wait[wait_semaphore_count].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR;
+            semaphores_list_wait[wait_semaphore_count].value     = 0; // ignored for binary semaphores
+            wait_semaphore_count++;
+        }
+        if (semaphore_timeline_wait)
+        {
+            semaphores_list_wait[wait_semaphore_count].sType     = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR;
+            semaphores_list_wait[wait_semaphore_count].semaphore = static_cast<VkSemaphore>(semaphore_timeline_wait->GetRhiResource());
+            semaphores_list_wait[wait_semaphore_count].stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT_KHR;
+            semaphores_list_wait[wait_semaphore_count].value     = timeline_wait_value;
+            wait_semaphore_count++;
         }
     
         // signal semaphores setup
@@ -200,11 +213,13 @@ namespace spartan
             {
                 if (Debugging::IsBreadcrumbsEnabled())
                 {
-                    bool flush = false; // we don't need to flush and we do, this will call Submit() again, causing stack overflow
-                    RHI_Device::QueueWaitAll(flush);
-                    RHI_VendorTechnology::Breadcrumbs_OnDeviceRemoved();
+                    Breadcrumbs::OnDeviceLost();
+                    SP_ERROR_WINDOW("GPU crashed. Check 'gpu_crash.txt' for breadcrumbs report.");
                 }
-                SP_ERROR_WINDOW("GPU crashed");
+                else
+                {
+                    SP_ERROR_WINDOW("GPU crashed. To capture breadcrumbs, enable them in debugging.h and re-run.");
+                }
             }
     
             SP_ASSERT_VK(result);

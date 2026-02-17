@@ -50,6 +50,7 @@ struct gbuffer_vertex
     float3 tangent           : TANGENT_WORLD;
     float4 uv_misc           : TEXCOORD;  // xy = uv, z = height_percent, w = instance_id - packed together to reduced the interpolators (shader registers) the gpu needs to track
     float width_percent      : TEXCOORD2; // temp, will remove
+    nointerpolation uint material_index : TEXCOORD3; // for indirect draws, material index passed from vs
 };
 
 float4x4 compose_instance_transform(min16float instance_position_x, min16float instance_position_y, min16float instance_position_z, uint instance_normal_oct, uint instance_yaw, uint instance_scale)
@@ -197,8 +198,8 @@ struct vertex_processing
         // wind simulation
         if (surface.is_grass_blade() || surface.is_flower())
         {
-            const float base_scale    = 0.025f;                              // spatial scale for noise sampling
-            const float time_scale    = 0.1f * (1.0f + base_wind_magnitude); // animation speed scales with wind strength
+            const float base_scale    = 0.032f;                              // spatial scale for noise sampling (higher = more waves)
+            const float time_scale    = 0.06f * (1.0f + base_wind_magnitude); // animation speed scales with wind strength
             const float sway_amp      = base_wind_magnitude * 2.5f;          // maximum bend angle multiplier
             const float max_angle_deg = 75.0f;                               // maximum rotation angle to prevent ground intersection
             
@@ -214,11 +215,15 @@ struct vertex_processing
             // layered noise for natural sway: broad base pattern + faster gust layer
             float2 uv   = position_world.xz * base_scale + base_wind_dir.xz * time * time_scale;
             float sway  = noise_perlin(uv) * 0.7f;
-            sway       += noise_perlin(uv * 2.0f + float2(time * 0.5f, 0.0f)) * 0.3f;
-            sway        = sway * sway_amp * height_factor * instance_var;
+            sway       += noise_perlin(uv * 1.5f + float2(time * 0.25f, 0.0f)) * 0.3f;
+            
+            // sharpen the wave transition for a more defined wave front
+            sway = sign(sway) * pow(abs(sway), 0.55f);
+            
+            sway = sway * sway_amp * height_factor * instance_var;
 
             // wind direction variation for natural randomness
-            float dir_var   = noise_perlin(position_world.xz * 0.01f + time * 0.05f) * (PI / 6.0f);
+            float dir_var   = noise_perlin(position_world.xz * 0.016f + time * 0.025f) * (PI / 6.0f);
             float3 bend_dir = normalize(base_wind_dir + float3(sin(dir_var), 0.0f, cos(dir_var)));
 
             // calculate maximum allowed angle: ensure blade never goes below horizontal

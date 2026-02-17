@@ -45,13 +45,14 @@ jobs:
       - name: Setup MSBuild / Visual Studio Environment
         uses: microsoft/setup-msbuild@v1
         with:
-          vs-version: '[17.0,20.0)'
+          vs-version: '[17.0,18.0)'
 
       - name: Show MSVC version (for debugging)
         shell: cmd
         run: |
           where msbuild
           msbuild /version
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat" && cl
 
       - name: Generate project files
         shell: python
@@ -62,7 +63,8 @@ jobs:
           import subprocess
           import os
           api = os.environ["API"]
-          subprocess.run(f"python generate_vs2026_{api}.py ci")
+          choice = "1" if api == "vulkan" else "2"
+          subprocess.run(["python", "generate_project_files.py", choice])
           
       - name: Verify solution file exists
         shell: cmd
@@ -87,10 +89,10 @@ jobs:
           echo "Creating artifacts for ${{ matrix.api }} - ${{ matrix.configuration }}"
           IF "${{ matrix.configuration }}" == "release" (
             echo "Creating binaries-only archive for Release..."
-            build_scripts\7z.exe a -bb1 spartan_vulkan_release.7z .\binaries\7z.exe .\binaries\7z.dll .\binaries\dxcompiler.dll .\binaries\libxess.dll .\binaries\download_assets.py .\binaries\file_utilities.py .\binaries\data .\binaries\spartan_${{ matrix.api }}.exe
+            build_scripts\7z.exe a -bb1 spartan_vulkan_release.7z .\binaries\7z.exe .\binaries\7z.dll .\binaries\dxcompiler.dll .\binaries\libxess.dll .\binaries\data .\binaries\spartan_${{ matrix.api }}.exe
           ) ELSE (
             echo "Creating binaries-only archive for Debug..."
-            build_scripts\7z.exe a -bb1 spartan_vulkan_debug.7z .\binaries\7z.exe .\binaries\7z.dll .\binaries\libxess.dll .\binaries\download_assets.py .\binaries\file_utilities.py .\binaries\data .\binaries\spartan_${{ matrix.api }}_debug.exe
+            build_scripts\7z.exe a -bb1 spartan_vulkan_debug.7z .\binaries\7z.exe .\binaries\7z.dll .\binaries\libxess.dll .\binaries\data .\binaries\spartan_${{ matrix.api }}_debug.exe
           )
           echo "Artifact creation completed for ${{ matrix.api }} - ${{ matrix.configuration }}"
 

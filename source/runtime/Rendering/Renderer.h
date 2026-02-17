@@ -21,7 +21,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
 
-//= INCLUDES ====================
+//= INCLUDES ===================================
 #include "Renderer_Definitions.h"
 #include "../RHI/RHI_Texture.h"
 #include "../Math/Vector3.h"
@@ -33,7 +33,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <unordered_map>
 #include <atomic>
 #include "../Math/Rectangle.h"
-//===============================
+//==============================================
 
 namespace spartan
 {
@@ -48,7 +48,7 @@ namespace spartan
         class Frustum;
     }
 
-    // renderer cvars (defined in Renderer.cpp, use .GetValue() or .GetValueAs<T>() for direct access in hot paths)
+    // console varibales
     extern TConsoleVar<float> cvar_aabb;
     extern TConsoleVar<float> cvar_picking_ray;
     extern TConsoleVar<float> cvar_grid;
@@ -81,19 +81,10 @@ namespace spartan
     extern TConsoleVar<float> cvar_variable_rate_shading;
     extern TConsoleVar<float> cvar_resolution_scale;
     extern TConsoleVar<float> cvar_dynamic_resolution;
-    extern TConsoleVar<float> cvar_occlusion_culling;
+    extern TConsoleVar<float> cvar_hiz_occlusion;
     extern TConsoleVar<float> cvar_auto_exposure_adaptation_speed;
-    // volumetric clouds
-    extern TConsoleVar<float> cvar_clouds_enabled;
-    extern TConsoleVar<float> cvar_cloud_animation;
     extern TConsoleVar<float> cvar_cloud_coverage;
-    extern TConsoleVar<float> cvar_cloud_type;
     extern TConsoleVar<float> cvar_cloud_shadows;
-    extern TConsoleVar<float> cvar_cloud_color_r;
-    extern TConsoleVar<float> cvar_cloud_color_g;
-    extern TConsoleVar<float> cvar_cloud_color_b;
-    extern TConsoleVar<float> cvar_cloud_darkness;
-    extern TConsoleVar<float> cvar_cloud_seed;
 
     struct ShadowSlice
     {
@@ -103,14 +94,13 @@ namespace spartan
         math::Rectangle rect;
     };
 
-    // persistent debug line that expires after a certain duration
     struct PersistentLine
     {
         math::Vector3 from;
         math::Vector3 to;
         Color color_from;
         Color color_to;
-        double expire_time; // time in seconds when this line should expire
+        double expire_time;
     };
 
     class Renderer
@@ -137,6 +127,7 @@ namespace spartan
         // swapchain
         static RHI_SwapChain* GetSwapChain();
         static void BlitToBackBuffer(RHI_CommandList* cmd_list, RHI_Texture* texture);
+        static void BlitToXrSwapchain(RHI_CommandList* cmd_list, RHI_Texture* texture);
         static void SubmitAndPresent();
 
         // misc
@@ -145,6 +136,9 @@ namespace spartan
         static RHI_Api_Type GetRhiApiType();
         static void Screenshot();
         static RHI_CommandList* GetCommandListPresent() { return m_cmd_list_present; }
+
+        // write a draw data entry and return its index
+        static uint32_t WriteDrawData(const math::Matrix& transform, const math::Matrix& transform_previous = math::Matrix::Identity, uint32_t material_index = 0, uint32_t is_transparent = 0);
 
         // wind
         static const math::Vector3& GetWind();
@@ -177,11 +171,11 @@ namespace spartan
         static RHI_Buffer* GetBuffer(const Renderer_Buffer type);
         static RHI_Texture* GetStandardTexture(const Renderer_StandardTexture type);
         static RHI_AccelerationStructure* GetTopLevelAccelerationStructure();
+        static void DestroyAccelerationStructures();
         static std::shared_ptr<Mesh>& GetStandardMesh(const MeshType type);
         static std::shared_ptr<Font>& GetFont();
         static std::shared_ptr<Material>& GetStandardMaterial();
-        static void SwapVisibilityBuffers();
-
+        static void ClearMaterialTextureReferences();
     private:
         static void UpdateFrameConstantBuffer(RHI_CommandList* cmd_list);
 
@@ -193,6 +187,7 @@ namespace spartan
         static void CreateShaders();
         static void CreateSamplers();
         static void CreateRenderTargets(const bool create_render, const bool create_output, const bool create_dynamic);
+        static void UpdateOptionalRenderTargets();
         static void CreateFonts();
         static void CreateStandardMeshes();
         static void CreateStandardTextures();
@@ -202,7 +197,8 @@ namespace spartan
         static void ProduceFrame(RHI_CommandList* cmd_list_graphics_present, RHI_CommandList* cmd_list_compute);
         static void Pass_VariableRateShading(RHI_CommandList* cmd_list);
         static void Pass_ShadowMaps(RHI_CommandList* cmd_list);
-        static void Pass_Occlusion(RHI_CommandList* cmd_list);
+        static void Pass_HiZ(RHI_CommandList* cmd_list);
+        static void Pass_IndirectCull(RHI_CommandList* cmd_list);
         static void Pass_Depth_Prepass(RHI_CommandList* cmd_list);
         static void Pass_GBuffer(RHI_CommandList* cmd_list, const bool is_transparent_pass);
         static void Pass_ScreenSpaceAmbientOcclusion(RHI_CommandList* cmd_list);
@@ -210,7 +206,7 @@ namespace spartan
         static void Pass_RayTracedReflections(RHI_CommandList* cmd_list);
         static void Pass_RayTracedShadows(RHI_CommandList* cmd_list);
         static void Pass_ReSTIR_PathTracing(RHI_CommandList* cmd_list);
-        static void SwapReSTIRReservoirs();
+        static void Pass_Denoiser(RHI_CommandList* cmd_list, RHI_Texture* tex_in, RHI_Texture* tex_out);
         static void Pass_Light_Reflections(RHI_CommandList* cmd_list);
         static void Pass_ScreenSpaceShadows(RHI_CommandList* cmd_list);
         static void Pass_Skysphere(RHI_CommandList* cmd_list);
@@ -220,6 +216,8 @@ namespace spartan
         static void Pass_Light_ImageBased(RHI_CommandList* cmd_list);
         static void Pass_Lut_BrdfSpecular(RHI_CommandList* cmd_list);
         static void Pass_Lut_AtmosphericScattering(RHI_CommandList* cmd_list);
+        // passes - particles
+        static void Pass_Particles(RHI_CommandList* cmd_list);
         // passes - volumetric clouds
         static void Pass_CloudNoise(RHI_CommandList* cmd_list);
         static void Pass_CloudShadow(RHI_CommandList* cmd_list);
@@ -256,6 +254,10 @@ namespace spartan
         static void UpdateLights(RHI_CommandList* cmd_lis);
         static void UpdatedBoundingBoxes(RHI_CommandList* cmd_list);
 
+        // returns true if a draw must go through the cpu-driven path (tessellated, instanced, alpha-tested, double-sided)
+        // the gpu-driven indirect path only handles opaque, back-face-culled, non-instanced, non-tessellated draws
+        static bool IsCpuDrivenDraw(const Renderer_DrawCall& draw_call, Material* material);
+
         // misc
         static void AddLinesToBeRendered();
         static void UpdatePersistentLines();
@@ -264,6 +266,7 @@ namespace spartan
         static void UpdateShadowAtlas();
         static void UpdateDrawCalls(RHI_CommandList* cmd_list);
         static void UpdateAccelerationStructures(RHI_CommandList* cmd_list);
+        static void RotateDrawDataBuffer();
 
         // draw calls
         static std::array<Renderer_DrawCall, renderer_max_draw_calls> m_draw_calls;
@@ -271,11 +274,52 @@ namespace spartan
         static std::array<Renderer_DrawCall, renderer_max_draw_calls> m_draw_calls_prepass;
         static uint32_t m_draw_calls_prepass_count;
 
+        // gpu-driven indirect drawing
+        static std::array<Sb_IndirectDrawArgs, rhi_max_array_size> m_indirect_draw_args;
+        static std::array<Sb_DrawData, rhi_max_array_size> m_indirect_draw_data;
+        static uint32_t m_indirect_draw_count;
+
+        // bindless draw data (per-draw transforms, material indices, etc.)
+        static std::array<Sb_DrawData, renderer_max_draw_calls> m_draw_data_cpu;
+        static uint32_t m_draw_data_count;
+        static std::array<std::shared_ptr<RHI_Buffer>, renderer_draw_data_buffer_count> m_draw_data_buffers;
+        static uint32_t m_draw_data_buffer_index;
+
         // bindless
         static std::array<RHI_Texture*, rhi_max_array_size> m_bindless_textures;
         static std::array<Sb_Light, rhi_max_array_size> m_bindless_lights;
         static std::array<Sb_Aabb, rhi_max_array_size> m_bindless_aabbs;
         static bool m_bindless_samplers_dirty;
+
+        // one-shot and feature-toggle state, consolidated for easy reset on reinitialize
+        struct PassState
+        {
+            // one-shot initialization (run once, never again unless reset)
+            bool brdf_lut_produced       = false;
+            bool atmosphere_lut_produced = false;
+            bool cloud_noise_produced    = false;
+
+            // feature-toggle clear flags (set when feature disabled, reset when re-enabled)
+            bool cleared_reflections     = false;
+            bool cleared_rt_reflections  = false;
+            bool cleared_rt_shadows      = false;
+            bool cleared_restir          = false;
+
+            // skysphere convergence tracking
+            bool     sky_first_frame           = true;
+            bool     sky_had_directional_light = false;
+            float    sky_last_coverage         = -1.0f;
+            uint32_t sky_frames_remaining      = 0;
+
+            // vrs
+            RHI_Texture* vrs_last_cleared_texture = nullptr;
+
+            void Reset()
+            {
+                *this = PassState();
+            }
+        };
+        static PassState m_pass_state;
 
         // misc
         static Cb_Frame m_cb_frame_cpu;
@@ -289,10 +333,8 @@ namespace spartan
         static std::mutex m_mutex_renderables;
         static bool m_transparents_present;
         static RHI_CommandList* m_cmd_list_present;
+        static RHI_CommandList* m_cmd_list_compute;
         static std::vector<ShadowSlice> m_shadow_slices;
-        static std::unique_ptr<RHI_Buffer> m_std_reflections; // it temporarily lives here
-        static std::unique_ptr<RHI_Buffer> m_std_shadows;     // shader binding table for ray traced shadows
-        static std::unique_ptr<RHI_Buffer> m_std_restir;      // shader binding table for restir path tracing
         static uint32_t m_count_active_lights;
     };
 }

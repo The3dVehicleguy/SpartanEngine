@@ -29,6 +29,11 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Math/BoundingBox.h"
 //================================
 
+namespace sol
+{
+    class state_view;
+}
+
 namespace spartan
 {
     class RHI_Buffer;
@@ -44,14 +49,6 @@ namespace spartan
         PostProcessOptimize             = 1 << 4,
         PostProcessGenerateLods         = 1 << 5,
         PostProcessPreserveTerrainEdges = 1 << 6,
-    };
-
-    enum class MeshLodDropoff
-    {
-        Exponential, // slow early, fast late poly reduction (t^2), detail-heavy mid-range
-        Linear,      // medium reduction across LODs (t), balanced for general use
-        Aggressive,  // fast early, slow late reduction (sqrt(t)), optimizes distant objects
-        Max
     };
 
     enum class MeshType
@@ -85,6 +82,8 @@ namespace spartan
         Mesh();
         ~Mesh();
 
+        static void RegisterForScripting(sol::state_view State);
+
         // iresource
         void SaveToFile(const std::string& file_path) override;
         void LoadFromFile(const std::string& file_path) override;
@@ -99,10 +98,6 @@ namespace spartan
         std::vector<uint32_t>& GetIndices()                   { return m_indices; }
         const SubMesh& GetSubMesh(const uint32_t index) const { return m_sub_meshes[index]; }
 
-        // lod dropoff
-        MeshLodDropoff GetLodDropoff() const             { return m_lod_dropoff; }
-        void SetLodDropoff(const MeshLodDropoff dropoff) { m_lod_dropoff = dropoff; }
-
         // get counts
         uint32_t GetVertexCount() const;
         uint32_t GetIndexCount() const;
@@ -110,8 +105,12 @@ namespace spartan
         // gpu buffers
         void CreateGpuBuffers();
         void BuildAccelerationStructure(RHI_CommandList* cmd_list);
-        RHI_Buffer* GetIndexBuffer()  { return m_index_buffer.get();  }
-        RHI_Buffer* GetVertexBuffer() { return m_vertex_buffer.get(); }
+        RHI_Buffer* GetIndexBuffer();
+        RHI_Buffer* GetVertexBuffer();
+
+        // global geometry buffer offsets
+        uint32_t GetGlobalVertexOffset() const { return m_global_vertex_offset; }
+        uint32_t GetGlobalIndexOffset() const  { return m_global_index_offset; }
 
         // root entity
         Entity* GetRootEntity() { return m_root_entity; }
@@ -135,15 +134,16 @@ namespace spartan
         std::vector<uint32_t> m_indices;                 // all indices of a model file
         std::vector<SubMesh> m_sub_meshes;               // tracks sub-meshes and lods within the above vectors
 
-        // gpu buffers
-        std::unique_ptr<RHI_Buffer> m_vertex_buffer;
-        std::unique_ptr<RHI_Buffer> m_index_buffer;
+        // global geometry buffer offsets (base offsets into the shared vertex/index buffers)
+        uint32_t m_global_vertex_offset = 0;
+        uint32_t m_global_index_offset  = 0;
+
+        // acceleration structures
         std::vector<std::unique_ptr<RHI_AccelerationStructure>> m_blas; // one blas per sub-mesh
 
         // misc
         std::mutex m_mutex;
-        Entity* m_root_entity        = nullptr;
-        MeshType m_type              = MeshType::Max;
-        MeshLodDropoff m_lod_dropoff = MeshLodDropoff::Linear;
+        Entity* m_root_entity = nullptr;
+        MeshType m_type       = MeshType::Max;
     };
 }

@@ -27,9 +27,10 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 namespace spartan
 {
-    const uint32_t renderer_resource_frame_lifetime = 100;
-    const uint32_t renderer_max_draw_calls          = 20000;
-    const uint32_t renderer_max_instance_count      = 1024;
+    const uint32_t renderer_resource_frame_lifetime    = 100;
+    const uint32_t renderer_max_draw_calls            = 20000;
+    const uint32_t renderer_max_instance_count        = 1024;
+    const uint32_t renderer_draw_data_buffer_count    = 4; // matches the command list pool size to avoid cpu-gpu memcpy races
 
     enum class Renderer_Option : uint32_t
     {
@@ -67,15 +68,8 @@ namespace spartan
         OcclusionCulling,
         AutoExposureAdaptationSpeed,
         // volumetric clouds
-        CloudAnimation, // whether clouds animate (wind movement)
-        CloudCoverage,  // 0=no clouds, >0=clouds visible
-        CloudType,
-        CloudShadows,
-        CloudColorR,
-        CloudColorG,
-        CloudColorB,
-        CloudDarkness,
-        CloudSeed,      // seed for cloud generation
+        CloudCoverage, // 0=clear sky, 1=overcast
+        CloudShadows,  // shadow intensity on ground
         Max
     };
 
@@ -179,16 +173,17 @@ namespace spartan
         bindless_material_parameters = 16,
         bindless_light_parameters    = 17,
         bindless_aabbs               = 18,
+        bindless_draw_data           = 19,
         
         // volumetric clouds 3D noise
-        tex3d_cloud_shape  = 19,
-        tex3d_cloud_detail = 20,
+        tex3d_cloud_shape  = 20,
+        tex3d_cloud_detail = 21,
         // restir reservoir srv bindings (for temporal/spatial read)
-        reservoir_prev0    = 21,
-        reservoir_prev1    = 22,
-        reservoir_prev2    = 23,
-        reservoir_prev3    = 24,
-        reservoir_prev4    = 25,
+        reservoir_prev0    = 22,
+        reservoir_prev1    = 23,
+        reservoir_prev2    = 24,
+        reservoir_prev3    = 25,
+        reservoir_prev4    = 26,
     };
 
     enum class Renderer_BindingsUav
@@ -199,7 +194,7 @@ namespace spartan
         tex4          = 3,
         tex3d         = 4,
         tex_sss       = 5,
-        visibility    = 6,
+        visibility_unused = 6, // slot preserved to keep enum values stable
         sb_spd        = 7,
         tex_spd       = 8,
         geometry_info = 20, // ray tracing geometry info buffer
@@ -209,6 +204,24 @@ namespace spartan
         reservoir2    = 23,
         reservoir3    = 24,
         reservoir4    = 25,
+        // nrd output bindings
+        nrd_viewz              = 26,
+        nrd_normal_roughness   = 27,
+        nrd_diff_radiance      = 28,
+        nrd_spec_radiance      = 29,
+        // integer format textures (vrs, etc)
+        tex_uint               = 30,
+        // gpu-driven indirect drawing
+        indirect_draw_args     = 31,
+        indirect_draw_data     = 32,
+        indirect_draw_args_out = 33,
+        indirect_draw_data_out = 34,
+        indirect_draw_count    = 35,
+        // gpu-driven particles
+        particle_buffer_a      = 36,
+        particle_buffer_b      = 37,
+        particle_counter       = 38,
+        particle_emitter       = 39,
     };
 
     enum class Renderer_Shader : uint8_t
@@ -260,7 +273,7 @@ namespace spartan
         ffx_spd_min_c,
         ffx_spd_max_c,
         blit_c,
-        occlusion_c,
+        occlusion_c_unused, // slot preserved to keep enum values stable
         icon_c,
         dithering_c,
         transparency_reflection_refraction_c,
@@ -283,6 +296,17 @@ namespace spartan
         cloud_noise_detail_c,
         cloud_shadow_c,
         light_reflections_c,
+        // nrd denoiser
+        nrd_prepare_c,
+        // gpu-driven indirect rendering
+        indirect_cull_c,
+        gbuffer_indirect_v,
+        gbuffer_indirect_p,
+        depth_prepass_indirect_v,
+        // gpu-driven particles
+        particle_emit_c,
+        particle_simulate_c,
+        particle_render_c,
         max
     };
     
@@ -337,10 +361,25 @@ namespace spartan
         restir_reservoir_prev2,
         restir_reservoir_prev3,
         restir_reservoir_prev4,
+        // restir reservoir buffers (spatial ping-pong)
+        restir_reservoir_spatial0,
+        restir_reservoir_spatial1,
+        restir_reservoir_spatial2,
+        restir_reservoir_spatial3,
+        restir_reservoir_spatial4,
         // volumetric clouds
         cloud_noise_shape,
         cloud_noise_detail,
         cloud_shadow,
+        // nrd denoiser textures
+        nrd_viewz,
+        nrd_normal_roughness,
+        nrd_diff_radiance_hitdist,
+        nrd_spec_radiance_hitdist,
+        nrd_out_diff_radiance_hitdist,
+        nrd_out_spec_radiance_hitdist,
+        // debug
+        debug_output,
         max
     };
 
@@ -366,23 +405,28 @@ namespace spartan
         LightParameters,
         DummyInstance,
         AABBs,
-        Visibility,
-        VisibilityPrevious,
+        Visibility_unused,         // slot preserved to keep enum values stable
+        VisibilityPrev_unused,     // slot preserved to keep enum values stable
+        VisibilityReadback_unused, // slot preserved to keep enum values stable
         GeometryInfo,
+        IndirectDrawArgs,
+        IndirectDrawData,
+        IndirectDrawDataOut,
+        IndirectDrawArgsOut,
+        IndirectDrawCount,
+        DrawData,                  // bindless per-draw data (transforms, material index, etc.)
+        // gpu-driven particles
+        ParticleBufferA,
+        ParticleBufferB,
+        ParticleCounter,
+        ParticleEmitter,
         Max
     };
 
     enum class Renderer_StandardTexture
     {
         Noise_perlin,
-        Noise_blue_0,
-        Noise_blue_1,
-        Noise_blue_2,
-        Noise_blue_3,
-        Noise_blue_4,
-        Noise_blue_5,
-        Noise_blue_6,
-        Noise_blue_7,
+        Noise_blue, // single blue noise texture (was 8, only 1 used)
         Checkerboard,
         Gizmo_light_directional,
         Gizmo_light_point,
@@ -428,13 +472,14 @@ namespace spartan
     class Renderable;
     struct Renderer_DrawCall
     {
-        Renderable* renderable  = nullptr;
-        uint32_t instance_index = 0;
-        uint32_t instance_count = 0;
-        uint32_t lod_index      = 0;
-        float distance_squared  = 0.0f;
-        bool is_occluder        = false;
-        bool camera_visible     = false;
+        Renderable* renderable   = nullptr;
+        uint32_t instance_index  = 0;
+        uint32_t instance_count  = 0;
+        uint32_t lod_index       = 0;
+        uint32_t draw_data_index = 0; // index into the bindless draw data buffer
+        float distance_squared   = 0.0f;
+        bool is_occluder         = false;
+        bool camera_visible      = false;
     };
 
 }

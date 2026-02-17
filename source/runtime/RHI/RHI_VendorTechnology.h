@@ -31,13 +31,6 @@ namespace spartan
     class Camera;
     struct Cb_Frame;
 
-    enum class AMD_FFX_Marker
-    {
-        Pass,
-        Dispatch,
-        DrawIndexed
-    };
-
     class RHI_VendorTechnology
     {
     public:
@@ -69,12 +62,25 @@ namespace spartan
             RHI_Texture* tex_output
         );
 
-        // breadcrumbs
-        static void Breadcrumbs_RegisterCommandList(RHI_CommandList* cmd_list, const RHI_Queue* queue, const char* name);
-        static void Breadcrumbs_RegisterPipeline(RHI_Pipeline* pipeline);
-        static void Breadcrumbs_SetPipelineState(RHI_CommandList* cmd_list, RHI_Pipeline* pipeline);
-        static void Breadcrumbs_MarkerBegin(RHI_CommandList* cmd_list, const AMD_FFX_Marker marker, const char* name);
-        static void Breadcrumbs_MarkerEnd(RHI_CommandList* cmd_list);
-        static void Breadcrumbs_OnDeviceRemoved();
+        // nvidia nrd (denoiser for restir path tracing)
+        static void NRD_Initialize(uint32_t width, uint32_t height);
+        static void NRD_Shutdown();
+        static void NRD_Resize(uint32_t width, uint32_t height);
+        static void NRD_Denoise(
+            RHI_CommandList* cmd_list,
+            RHI_Texture* tex_noisy,
+            RHI_Texture* tex_output,
+            const math::Matrix& view_matrix,
+            const math::Matrix& projection_matrix,
+            const math::Matrix& view_matrix_prev,
+            const math::Matrix& projection_matrix_prev,
+            float jitter_x,
+            float jitter_y,
+            float jitter_prev_x,
+            float jitter_prev_y,
+            float time_delta_ms,
+            uint32_t frame_index
+        );
+        static bool NRD_IsAvailable();
     };
 }
