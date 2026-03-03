@@ -69,10 +69,10 @@ namespace spartan
         [[nodiscard]] int GetDaysInYearImpl(int year) const override;
         [[nodiscard]] unsigned int GetLengthOfMonthImpl(int month, bool leap) const override;
 
-        [[nodiscard]] std::string GetMonthNameImpl(int month) const override;
-        [[nodiscard]] std::string GetDayNameImpl(int day) const override;
-        [[nodiscard]] std::string GetSeasonNameImpl(int month) const override;
-        [[nodiscard]] std::string GetDayCycleNameImpl(float timeOfDay) const override;
+        [[nodiscard]] std::string_view GetMonthNameImpl(int month) const override;
+        [[nodiscard]] std::string_view GetDayNameImpl(int day) const override;
+        [[nodiscard]] std::string_view GetSeasonNameImpl(int month) const override;
+        [[nodiscard]] std::string_view GetDayCycleNameImpl(float timeOfDay) const override;
 
     private:
         int m_days_in_year      = 365;  // Default to 365, can be overridden by month lengths

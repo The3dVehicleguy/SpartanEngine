@@ -25,6 +25,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <chrono>
 #include <memory>
 #include <string>
+#include <string_view>
 //===============================
 
 namespace spartan
@@ -57,7 +58,7 @@ namespace spartan
          * instance.
          */
         static Calendar& Instance();
-        static void SetInstance(std::shared_ptr<Calendar> calendar);
+        static void SetInstance(std::unique_ptr<Calendar> calendar);
         static void DestroyInstance();
         static void ResetInstance();
         static void SetCurrentTimeOffset(std::chrono::seconds offset);
@@ -100,10 +101,10 @@ namespace spartan
         [[nodiscard]] virtual double GetTimeInDaysImpl(int year, int month, int day, int hour, int minute, int second) const;
         [[nodiscard]] virtual bool IsValidDateImpl(int year, int month, int day) const;
         [[nodiscard]] virtual unsigned int GetLengthOfMonthImpl(int month, bool leap) const;
-        [[nodiscard]] virtual std::string GetMonthNameImpl(int month) const;
-        [[nodiscard]] virtual std::string GetDayNameImpl(int day) const;
-        [[nodiscard]] virtual std::string GetSeasonNameImpl(int month) const;
-        [[nodiscard]] virtual std::string GetDayCycleNameImpl(float timeOfDay) const;
+        [[nodiscard]] virtual std::string_view GetMonthNameImpl(int month) const;
+        [[nodiscard]] virtual std::string_view GetDayNameImpl(int day) const;
+        [[nodiscard]] virtual std::string_view GetSeasonNameImpl(int month) const;
+        [[nodiscard]] virtual std::string_view GetDayCycleNameImpl(float timeOfDay) const;
 
         [[nodiscard]] double GetDateInDays(int year, int month, int day) const;
 

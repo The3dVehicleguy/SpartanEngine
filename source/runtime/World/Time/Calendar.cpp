@@ -35,7 +35,7 @@ namespace spartan
 
     namespace
     {
-        std::shared_ptr<Calendar> calendar_instance;
+        std::unique_ptr<Calendar> calendar_instance;
     }
 
     void Calendar::AdvanceTime(const milliseconds delta)
@@ -52,13 +52,13 @@ namespace spartan
     {
         if (!calendar_instance)
         {
-            calendar_instance = std::make_shared<Calendar>();
+            calendar_instance = std::make_unique<Calendar>();
         }
 
         return *calendar_instance;
     }
 
-    void Calendar::SetInstance(std::shared_ptr<Calendar> calendar)
+    void Calendar::SetInstance(std::unique_ptr<Calendar> calendar)
     {
         if (calendar)
         {
@@ -73,7 +73,7 @@ namespace spartan
 
     void Calendar::ResetInstance()
     {
-        calendar_instance = std::make_shared<Calendar>();
+        calendar_instance = std::make_unique<Calendar>();
     }
 
     void Calendar::SetCurrentTimeOffset(const seconds offset)
@@ -138,22 +138,22 @@ namespace spartan
 
     std::string Calendar::GetMonthName(const int month)
     {
-        return Instance().GetMonthNameImpl(month);
+        return std::string(Instance().GetMonthNameImpl(month));
     }
 
     std::string Calendar::GetDayName(const int day)
     {
-        return Instance().GetDayNameImpl(day);
+        return std::string(Instance().GetDayNameImpl(day));
     }
 
     std::string Calendar::GetSeasonName(const int month)
     {
-        return Instance().GetSeasonNameImpl(month);
+        return std::string(Instance().GetSeasonNameImpl(month));
     }
 
     std::string Calendar::GetDayCycleName(const float timeOfDay)
     {
-        return Instance().GetDayCycleNameImpl(timeOfDay);
+        return std::string(Instance().GetDayCycleNameImpl(timeOfDay));
     }
 
     bool Calendar::IsLeapYearImpl(const int year) const
@@ -263,7 +263,7 @@ namespace spartan
         return 0;
     }
 
-    std::string Calendar::GetMonthNameImpl(const int month) const
+    std::string_view Calendar::GetMonthNameImpl(const int month) const
     {
         SP_ASSERT_MSG(month >= 1 && month <= 12, "Month must be in range 1..12");
         static const char* monthNames[12] = {
@@ -287,7 +287,7 @@ namespace spartan
         return monthNames[month - 1];
     }
 
-    std::string Calendar::GetDayNameImpl(const int day) const
+    std::string_view Calendar::GetDayNameImpl(const int day) const
     {
         SP_ASSERT_MSG(day >= 1 && day <= 7, "Day must be in range 1..7");
         static const char* dayNames[7] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
@@ -295,7 +295,7 @@ namespace spartan
         return dayNames[day - 1];
     }
 
-    std::string Calendar::GetSeasonNameImpl(const int month) const
+    std::string_view Calendar::GetSeasonNameImpl(const int month) const
     {
         SP_ASSERT_MSG(month >= 1 && month <= 12, "Month must be in range 1..12");
         static const char* seasonNames[4] = {"Winter", "Spring", "Summer", "Fall"};
@@ -320,7 +320,7 @@ namespace spartan
         return season;
     }
 
-    std::string Calendar::GetDayCycleNameImpl(const float timeOfDay) const
+    std::string_view Calendar::GetDayCycleNameImpl(const float timeOfDay) const
     {
         SP_ASSERT_MSG(timeOfDay >= 0.0f && timeOfDay < 24.0f, "Time of day must be in range 0..24");
 

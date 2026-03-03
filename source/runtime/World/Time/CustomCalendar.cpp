@@ -210,7 +210,7 @@ namespace spartan
         return Calendar::GetLengthOfMonthImpl(month, leap);
     }
 
-    std::string CustomCalendar::GetMonthNameImpl(const int month) const
+    std::string_view CustomCalendar::GetMonthNameImpl(const int month) const
     {
         if (!m_month_names.empty())
         {
@@ -224,7 +224,7 @@ namespace spartan
         return Calendar::GetMonthNameImpl(month);
     }
 
-    std::string CustomCalendar::GetDayNameImpl(const int day) const
+    std::string_view CustomCalendar::GetDayNameImpl(const int day) const
     {
         if (!m_day_names.empty())
         {
@@ -239,7 +239,7 @@ namespace spartan
     }
 
     // TODO: Allow developers to specify season lengths and names rather than just mapping them to the base calendar months.
-    std::string CustomCalendar::GetSeasonNameImpl(const int month) const
+    std::string_view CustomCalendar::GetSeasonNameImpl(const int month) const
     {
         if (!m_season_names.empty())
         {
@@ -255,7 +255,7 @@ namespace spartan
         return Calendar::GetSeasonNameImpl(month);
     }
 
-    std::string CustomCalendar::GetDayCycleNameImpl(const float timeOfDay) const
+    std::string_view CustomCalendar::GetDayCycleNameImpl(const float timeOfDay) const
     {
         if (!m_day_cycle_names.empty())
         {
