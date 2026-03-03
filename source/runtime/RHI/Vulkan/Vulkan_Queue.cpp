@@ -211,12 +211,10 @@ namespace spartan
     
             if (result == VK_ERROR_DEVICE_LOST)
             {
-                RHI_Device::SetDeviceLost();
-
                 if (Debugging::IsBreadcrumbsEnabled())
                 {
                     Breadcrumbs::OnDeviceLost();
-                    SP_ERROR_WINDOW("GPU crashed. Check 'gpu_crash.txt' for breadcrumbs report.");
+                    SP_ERROR_WINDOW("GPU crashed. Check 'log.txt' for breadcrumbs report.");
                 }
                 else
                 {

@@ -901,11 +901,14 @@ namespace spartan
                 { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, rhi_shader_register_shift_t, 19, 1,                  "draw_data"           }, // DrawData
                 { VK_DESCRIPTOR_TYPE_SAMPLER,        rhi_shader_register_shift_s, 0,  1,                  "samplers_comparison" }, // SamplersComparison
                 { VK_DESCRIPTOR_TYPE_SAMPLER,        rhi_shader_register_shift_s, 1,  8,                  "samplers_regular"    }, // SamplersRegular
+                { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, rhi_shader_register_shift_t, 20, 1,                  "geometry_vertices"   }, // GeometryVertices
+                { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, rhi_shader_register_shift_t, 22, 1,                  "geometry_indices"    }, // GeometryIndices
+                { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, rhi_shader_register_shift_t, 23, 1,                  "instances"           }, // Instances
             };
             static_assert(sizeof(configs) / sizeof(configs[0]) == static_cast<size_t>(RHI_Device_Bindless_Resource::Max), "config table size mismatch");
 
             // storage
-            array<VkDescriptorSet, static_cast<uint32_t>(RHI_Device_Bindless_Resource::Max)> sets       = {};
+            array<VkDescriptorSet, static_cast<uint32_t>(RHI_Device_Bindless_Resource::Max)> sets          = {};
             array<VkDescriptorSetLayout, static_cast<uint32_t>(RHI_Device_Bindless_Resource::Max)> layouts = {};
 
             uint32_t get_binding(RHI_Device_Bindless_Resource type)
@@ -1953,6 +1956,30 @@ namespace spartan
         if (buffer)
         {
             descriptors::bindless::update_buffer(RHI_Device_Bindless_Resource::DrawData, buffer);
+        }
+    }
+
+    void RHI_Device::UpdateBindlessGeometryVertices(RHI_Buffer* buffer)
+    {
+        if (buffer)
+        {
+            descriptors::bindless::update_buffer(RHI_Device_Bindless_Resource::GeometryVertices, buffer);
+        }
+    }
+
+    void RHI_Device::UpdateBindlessGeometryIndices(RHI_Buffer* buffer)
+    {
+        if (buffer)
+        {
+            descriptors::bindless::update_buffer(RHI_Device_Bindless_Resource::GeometryIndices, buffer);
+        }
+    }
+
+    void RHI_Device::UpdateBindlessInstances(RHI_Buffer* buffer)
+    {
+        if (buffer)
+        {
+            descriptors::bindless::update_buffer(RHI_Device_Bindless_Resource::Instances, buffer);
         }
     }
 
