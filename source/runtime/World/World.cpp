@@ -22,17 +22,15 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //= INCLUDES =========================
 #include "pch.h"
 #include "World.h"
-
 #include <algorithm>
 #include <sol/sol.hpp>
-
 #include "Entity.h"
 #include "Prefab.h"
 #include "../Game/Game.h"
 #include "../Profiling/Profiler.h"
 #include "../Core/ProgressTracker.h"
 #include "../Core/ThreadPool.h"
-#include "Components/Renderable.h"
+#include "Components/Render.h"
 #include "Components/Camera.h"
 #include "Components/Light.h"
 #include "Components/AudioSource.h"
@@ -134,7 +132,7 @@ namespace spartan
             {
                 if (entity->GetActive())
                 {
-                    if (Renderable* renderable = entity->GetComponent<Renderable>())
+                    if (Render* renderable = entity->GetComponent<Render>())
                     {
                         bounding_box.Merge(renderable->GetBoundingBox());
                     }
@@ -250,7 +248,7 @@ namespace spartan
             Entity          ::RegisterForScripting(state_view);
             Mesh            ::RegisterForScripting(state_view);
             AudioSource     ::RegisterForScripting(state_view);
-            Renderable      ::RegisterForScripting(state_view);
+            Render      ::RegisterForScripting(state_view);
             Physics         ::RegisterForScripting(state_view);
             Light           ::RegisterForScripting(state_view);
 
@@ -259,7 +257,7 @@ namespace spartan
                 "Camera",                   ComponentType::Camera,
                 "Light",                    ComponentType::Light,
                 "Physics",                  ComponentType::Physics,
-                "Renderable",               ComponentType::Renderable,
+                "Renderable",               ComponentType::Render,
                 "Terrain",                  ComponentType::Terrain,
                 "Volume",                   ComponentType::Volume,
                 "Script",                   ComponentType::Script
@@ -303,6 +301,8 @@ namespace spartan
             WorldTable["GetAudioSourceCount"]       = &World::GetAudioSourceCount;
             WorldTable["GetTimeOfDay"]              = &World::GetTimeOfDay;
             WorldTable["SetTimeOfDay"]              = &World::SetTimeOfDay;
+            WorldTable["GetWind"]                   = &World::GetWind;
+            WorldTable["SetWind"]                   = &World::SetWind;
             WorldTable["GetDirectionalLight"]       = &World::GetDirectionalLight;
             WorldTable["GetCurrentYear"]            = &Calendar::GetCurrentYear;
             WorldTable["GetCurrentMonth"]           = &Calendar::GetCurrentMonth;
@@ -609,6 +609,18 @@ namespace spartan
 
     }
 
+    namespace world_wind
+    {
+        Vector3 wind = Vector3::Zero;
+
+        void initialize()
+        {
+            float rotation_y      = 120.0f * math::deg_to_rad;
+            const float intensity = 3.0f;
+            wind = Vector3(sin(rotation_y), 0.0f, cos(rotation_y)) * intensity;
+        }
+    }
+
     void World::ProcessPendingRemovals()
     {
         lock_guard<mutex> lock(entity_access_mutex);
@@ -623,7 +635,7 @@ namespace spartan
             {
                 // clean up change tracking
                 entity_states.erase(id);
-                if (Material* mat = (*it)->GetComponent<Renderable>() ? (*it)->GetComponent<Renderable>()->GetMaterial() : nullptr)
+                if (Material* mat = (*it)->GetComponent<Render>() ? (*it)->GetComponent<Render>()->GetMaterial() : nullptr)
                 {
                     material_state_hashes.erase(mat->GetObjectId());
                 }
@@ -653,6 +665,7 @@ namespace spartan
     void World::Initialize()
     {
         InitializeCoreLua();
+        world_wind::initialize();
     }
 
     void World::Shutdown()
@@ -799,7 +812,7 @@ namespace spartan
                     // cull mode
                     uint8_t prev_cull = (state >> 16) & 0xFF;
                     uint8_t curr_cull = static_cast<uint8_t>(RHI_CullMode::None);
-                    if (Renderable* renderable = entity->GetComponent<Renderable>())
+                    if (Render* renderable = entity->GetComponent<Render>())
                     {
                         if (Material* material = renderable->GetMaterial())
                         {
@@ -1206,7 +1219,7 @@ namespace spartan
             {
                 // clean up change tracking
                 entity_states.erase(id);
-                if (Material* mat = entity->GetComponent<Renderable>() ? entity->GetComponent<Renderable>()->GetMaterial() : nullptr)
+                if (Material* mat = entity->GetComponent<Render>() ? entity->GetComponent<Render>()->GetMaterial() : nullptr)
                 {
                     material_state_hashes.erase(mat->GetObjectId());
                 }
@@ -1390,7 +1403,7 @@ namespace spartan
         bool changed = false;
         for (Entity* entity : entities)
         {
-            if (Renderable* renderable = entity->GetComponent<Renderable>())
+            if (Render* renderable = entity->GetComponent<Render>())
             {
                 if (Material* material = renderable->GetMaterial())
                 {
@@ -1430,6 +1443,16 @@ namespace spartan
         }
 
         return false;
+    }
+
+    const Vector3& World::GetWind()
+    {
+        return world_wind::wind;
+    }
+
+    void World::SetWind(const Vector3& wind)
+    {
+        world_wind::wind = wind;
     }
 
     const string& World::GetDescription()

@@ -26,7 +26,6 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <vector>
 #include <functional>
 #include <sol/sol.hpp>
-
 #include "../../Core/SpartanObject.h"
 //===================================
 
@@ -40,7 +39,7 @@ namespace spartan
     class Entity;
     class FileStream;
 
-#define SP_COMPONENT_ARRAY Script, AudioSource, Renderable, Camera, Light, Terrain, Volume, Physics, Spline, SplineFollower, ParticleSystem
+#define SP_COMPONENT_ARRAY Script, AudioSource, Render, Camera, Light, Terrain, Volume, Physics, Spline, SplineFollower, ParticleSystem
 
     // X-Macro: single source of truth for all components
     // Format: X(ClassName, string_name)
@@ -50,7 +49,7 @@ namespace spartan
         X(Camera,           camera)              \
         X(Light,            light)               \
         X(Physics,          physics)             \
-        X(Renderable,       renderable)          \
+        X(Render,           render)              \
         X(Spline,           spline)              \
         X(SplineFollower,   spline_follower)     \
         X(Terrain,          terrain)             \

@@ -22,7 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //= INCLUDES ========================
 #include "pch.h"
 #include "Volume.h"
-#include "Renderable.h"
+#include "Render.h"
 #include "../Entity.h"
 #include "../../Core/Engine.h"
 #include "../../Rendering/Renderer.h"
@@ -42,7 +42,7 @@ namespace spartan
     {
         // if the entity has a renderable, match the volume to its mesh-space bounding box
         // (not the world-space one, since the volume transforms by the entity matrix itself)
-        if (Renderable* renderable = entity->GetComponent<Renderable>())
+        if (Render* renderable = entity->GetComponent<Render>())
         {
             m_bounding_box = renderable->GetBoundingBoxMesh();
         }

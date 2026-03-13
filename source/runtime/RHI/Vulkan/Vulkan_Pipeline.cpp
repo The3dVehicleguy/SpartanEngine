@@ -19,7 +19,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-//= INCLUDES ==============================
+//= INCLUDES ==========================
 #include "pch.h"
 #include "../RHI_Pipeline.h"
 #include "../RHI_Implementation.h"
@@ -34,8 +34,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI_Texture.h"
 #include "../RHI_VendorTechnology.h"
 #include "../Core/Debugging.h"
-#include "../World/Components/Renderable.h"
-//=========================================
+#include "../World/Components/Render.h"
+//=====================================
 
 //= NAMESPACES =====
 using namespace std;
@@ -170,7 +170,7 @@ namespace spartan
             pipeline_info.layout                      = static_cast<VkPipelineLayout>(m_rhi_resource_layout);
             pipeline_info.stage                       = shader_stages[0];
 
-            SP_ASSERT_VK(vkCreateComputePipelines(RHI_Context::device, nullptr, 1, &pipeline_info, nullptr, reinterpret_cast<VkPipeline*>(&m_rhi_resource)));
+            SP_ASSERT_VK(vkCreateComputePipelines(RHI_Context::device, static_cast<VkPipelineCache>(RHI_Device::GetPipelineCache()), 1, &pipeline_info, nullptr, reinterpret_cast<VkPipeline*>(&m_rhi_resource)));
             RHI_Device::SetResourceName(static_cast<void*>(m_rhi_resource), RHI_Resource_Type::Pipeline, pipeline_state.name);
         }
         else if (pipeline_state.IsGraphics())
@@ -477,7 +477,7 @@ namespace spartan
                     pipeline_info.layout                       = static_cast<VkPipelineLayout>(m_rhi_resource_layout);
                     pipeline_info.flags                        = m_state.vrs_input_texture ? VK_PIPELINE_CREATE_RENDERING_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR : 0;
                 
-                    SP_ASSERT_VK(vkCreateGraphicsPipelines(RHI_Context::device, nullptr, 1, &pipeline_info, nullptr, reinterpret_cast<VkPipeline*>(&m_rhi_resource)));
+                    SP_ASSERT_VK(vkCreateGraphicsPipelines(RHI_Context::device, static_cast<VkPipelineCache>(RHI_Device::GetPipelineCache()), 1, &pipeline_info, nullptr, reinterpret_cast<VkPipeline*>(&m_rhi_resource)));
                     RHI_Device::SetResourceName(static_cast<void*>(m_rhi_resource), RHI_Resource_Type::Pipeline, pipeline_state.name);
                 }
             }
@@ -524,7 +524,7 @@ namespace spartan
             pipeline_info.maxPipelineRayRecursionDepth      = 2; // number of bounces (2 for gi second bounce)
             pipeline_info.layout                            = static_cast<VkPipelineLayout>(m_rhi_resource_layout);
 
-            SP_ASSERT_VK(pfn_vk_create_ray_tracing_pipelines_khr(RHI_Context::device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, reinterpret_cast<VkPipeline*>(&m_rhi_resource)));
+            SP_ASSERT_VK(pfn_vk_create_ray_tracing_pipelines_khr(RHI_Context::device, VK_NULL_HANDLE, static_cast<VkPipelineCache>(RHI_Device::GetPipelineCache()), 1, &pipeline_info, nullptr, reinterpret_cast<VkPipeline*>(&m_rhi_resource)));
             RHI_Device::SetResourceName(static_cast<void*>(m_rhi_resource), RHI_Resource_Type::Pipeline, pipeline_state.name);
         }
 

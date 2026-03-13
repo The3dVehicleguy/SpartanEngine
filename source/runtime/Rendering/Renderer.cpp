@@ -162,12 +162,7 @@ namespace spartan
             // default tonemapping
             ConsoleRegistry::Get().SetValueFromString("r.tonemapping", to_string(static_cast<float>(Renderer_Tonemapping::GranTurismo7)));
 
-            // default wind
-            {
-                float rotation_y      = 120.0f * math::deg_to_rad;
-                const float intensity = 3.0f; // meters per second
-                SetWind(Vector3(sin(rotation_y), 0.0f, cos(rotation_y)) * intensity);
-            }
+            // wind is owned by World, initialized in World::Initialize()
         }
 
         // resolution (settings or editor may override later)
@@ -371,20 +366,18 @@ namespace spartan
                 UpdateAccelerationStructures(m_cmd_list_compute);
             }
     
-            // periodic resource cleanup
+            // resource cleanup - frame-based retirement, no gpu stall required
+            if (RHI_Device::DeletionQueueNeedsToParse())
+            {
+                RHI_Device::DeletionQueueParse();
+            }
+
+            // reset constant buffer offset periodically
             {
                 m_resource_index++;
-                bool is_sync_point = m_resource_index == renderer_resource_frame_lifetime;
-                if (is_sync_point)
+                if (m_resource_index == renderer_draw_data_buffer_count)
                 {
                     m_resource_index = 0;
-    
-                    if (RHI_Device::DeletionQueueNeedsToParse())
-                    {
-                        RHI_Device::QueueWaitAll();
-                        RHI_Device::DeletionQueueParse();
-                    }
-    
                     GetBuffer(Renderer_Buffer::ConstantFrame)->ResetOffset();
                 }
             }
@@ -710,6 +703,7 @@ namespace spartan
 
         m_cb_frame_cpu.cloud_coverage = cvar_cloud_coverage.GetValue();
         m_cb_frame_cpu.cloud_shadows  = cvar_cloud_shadows.GetValue();
+        m_cb_frame_cpu.wind           = World::GetWind();
         // feature bits (must match common_resources.hlsl)
         m_cb_frame_cpu.set_bit(cvar_ray_traced_reflections.GetValueAs<bool>(), 1 << 0);
         m_cb_frame_cpu.set_bit(cvar_ssao.GetValueAs<bool>(),                   1 << 1);
@@ -721,12 +715,12 @@ namespace spartan
 
     const Vector3& Renderer::GetWind()
     {
-        return m_cb_frame_cpu.wind;
+        return World::GetWind();
     }
 
     void Renderer::SetWind(const math::Vector3& wind)
     {
-        m_cb_frame_cpu.wind = wind;
+        World::SetWind(wind);
     }
 
     void Renderer::OnFullScreenToggled()
@@ -958,7 +952,7 @@ namespace spartan
             {
                 if (entity->GetActive())
                 {
-                    if (Renderable* renderable = entity->GetComponent<Renderable>())
+                    if (Render* renderable = entity->GetComponent<Render>())
                     {
                         if (Material* material = renderable->GetMaterial())
                         {
@@ -1115,7 +1109,7 @@ namespace spartan
         for (uint32_t i = 0; i < m_draw_calls_prepass_count; i++)
         {
             const Renderer_DrawCall& draw_call = m_draw_calls_prepass[i];
-            Renderable* renderable             = draw_call.renderable;
+            Render* renderable             = draw_call.renderable;
             const BoundingBox& aabb            = renderable->GetBoundingBox();
             m_bindless_aabbs[i].min            = aabb.GetMin();
             m_bindless_aabbs[i].max            = aabb.GetMax();
@@ -1173,7 +1167,7 @@ namespace spartan
                 if (!entity->GetActive())
                     continue;
 
-                if (Renderable* renderable = entity->GetComponent<Renderable>())
+                if (Render* renderable = entity->GetComponent<Render>())
                 {
                     Material* material = renderable->GetMaterial();
                     if (!material)
@@ -1260,7 +1254,7 @@ namespace spartan
             for (uint32_t i = 0; i < m_draw_call_count; i++)
             {
                 const Renderer_DrawCall& dc = m_draw_calls[i];
-                Renderable* renderable      = dc.renderable;
+                Render* renderable      = dc.renderable;
                 Material* material          = renderable->GetMaterial();
 
                 if (!material || material->IsTransparent())
@@ -1294,7 +1288,7 @@ namespace spartan
 
         // select occluders (top N by screen area, with temporal hysteresis)
         {
-            static unordered_set<Renderable*> previous_occluders;
+            static unordered_set<Render*> previous_occluders;
 
             auto compute_screen_space_area = [&](const BoundingBox& aabb_world) -> float
             {
@@ -1319,7 +1313,7 @@ namespace spartan
             for (uint32_t i = 0; i < m_draw_calls_prepass_count; i++)
             {
                 Renderer_DrawCall& draw_call = m_draw_calls_prepass[i];
-                Renderable* renderable = draw_call.renderable;
+                Render* renderable = draw_call.renderable;
                 Material* material = renderable->GetMaterial();
 
                 if (!material || material->IsTransparent() || renderable->HasInstancing() || !draw_call.camera_visible)
@@ -1367,6 +1361,8 @@ namespace spartan
 
         // blas
         {
+            cmd_list->BeginMarker("blas_build");
+
             uint32_t blas_built   = 0;
             uint32_t blas_skipped = 0;
             for (Entity* entity : World::GetEntities())
@@ -1374,7 +1370,7 @@ namespace spartan
                 if (!entity->GetActive())
                     continue;
 
-                if (Renderable* renderable = entity->GetComponent<Renderable>())
+                if (Render* renderable = entity->GetComponent<Render>())
                 {
                     if (!renderable->HasAccelerationStructure())
                     {
@@ -1390,15 +1386,30 @@ namespace spartan
                     }
                 }
             }
-            
-            if (blas_built > 0 || blas_skipped > 0)
+
+            // refit blas for deformable meshes (cloth, skinned, etc.)
+            for (Entity* entity : World::GetEntities())
             {
-                SP_LOG_INFO("Ray tracing: built %u BLAS, skipped %u (no sub-meshes)", blas_built, blas_skipped);
+                if (!entity->GetActive())
+                    continue;
+
+                if (Render* renderable = entity->GetComponent<Render>())
+                {
+                    if (renderable->NeedsBlasRefit() && renderable->HasAccelerationStructure())
+                    {
+                        renderable->RefitAccelerationStructure(cmd_list);
+                        renderable->SetNeedsBlasRefit(false);
+                    }
+                }
             }
+
+            cmd_list->EndMarker();
         }
 
         // tlas
         {
+            cmd_list->BeginMarker("tlas_build");
+
             if (!m_tlas)
             {
                 m_tlas = make_unique<RHI_AccelerationStructure>(RHI_AccelerationStructureType::Top, "world_tlas");
@@ -1416,7 +1427,7 @@ namespace spartan
                 if (!entity->GetActive())
                     continue;
     
-               if (Renderable* renderable = entity->GetComponent<Renderable>())
+               if (Render* renderable = entity->GetComponent<Render>())
                 {
                     if (Material* material = renderable->GetMaterial())
                     {
@@ -1472,6 +1483,8 @@ namespace spartan
                 m_tlas = nullptr;
                 last_instance_count = 0;
             }
+
+            cmd_list->EndMarker();
         }
     }
 
