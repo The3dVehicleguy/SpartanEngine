@@ -12,8 +12,8 @@ The above copyright notice and this permission notice shall be included in
 all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
@@ -21,66 +21,27 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 #pragma once
 
-//= INCLUDES =====================
+//= INCLUDES ====================================
+#include <string>
 #include "../Resource/IResource.h"
-#include "../Math/Matrix.h"
-//================================
+#include "Animation/AnimationClip.h"
+//===============================================
 
 namespace spartan
 {
-    struct AnimationVertexWeight
-    {
-        uint32_t vertexID;
-        float weight;
-    };
-
-    struct AnimationBone
-    {
-        std::string name;
-        std::vector<AnimationVertexWeight> vertexWeights;
-        math::Matrix offset;
-    };
-
-    struct KeyVector
-    {
-        double time;
-        math::Vector3 value;
-    };
-
-    struct KeyQuaternion
-    {
-        double time;
-        math::Quaternion value;
-    };
-
-    struct AnimationNode
-    {
-        std::string name;
-        std::vector<KeyVector> positionFrames;
-        std::vector<KeyQuaternion> rotationFrames;
-        std::vector<KeyVector> scaleFrames;
-    };
-
     class Animation : public IResource
     {
     public:
         Animation();
         ~Animation() = default;
 
-        // iresource
-        void LoadFromFile(const std::string& filePath) override;
-        void SaveToFile(const std::string& filePath) override;
+        void SaveToFile(const std::string& file_path) override;
+        void LoadFromFile(const std::string& file_path) override;
 
-        void SetObjectName(const std::string& name)   { m_object_name = name; }
-        void SetDuration(double duration)       { m_duration = duration; }
-        void SetTicksPerSec(double ticksPerSec) { m_ticksPerSec = ticksPerSec; }
+        AnimationClip& GetClip()             { return m_clip; }
+        const AnimationClip& GetClip() const { return m_clip; }
 
     private:
-        std::string m_object_name;
-        double m_duration    = 0;
-        double m_ticksPerSec = 0;
-
-        // Each channel controls a single node
-        std::vector<AnimationNode> m_channels;
+        AnimationClip m_clip;
     };
 }

@@ -19,42 +19,24 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
-//= INCLUDES ========================================
-#include "pch.h"
-#include "Animation.h"
-#include "../Resource/Animation/AnimationClipIO.h"
-//===================================================
+#pragma once
 
-//= NAMESPACES =====
-using namespace std;
-//==================
+//= INCLUDES ==================================
+#include "../../Rendering/Animation/AnimationClip.h"
+#include <string>
+//=============================================
 
 namespace spartan
 {
-    Animation::Animation(): IResource(ResourceType::Animation)
+    class AnimationClipReader
     {
+    public:
+        static bool ReadFromFile(const std::string& path, AnimationClip& clip);
+    };
 
-    }
-
-    void Animation::LoadFromFile(const string& file_path)
+    class AnimationClipWriter
     {
-        if (!AnimationClipReader::ReadFromFile(file_path, m_clip))
-        {
-            SP_LOG_ERROR("Failed to load animation clip from %s", file_path.c_str());
-            return;
-        }
-
-        SetResourceFilePath(file_path);
-    }
-
-    void Animation::SaveToFile(const string& file_path)
-    {
-        if (!AnimationClipWriter::WriteToFile(m_clip, file_path))
-        {
-            SP_LOG_ERROR("Failed to save animation clip to %s", file_path.c_str());
-            return;
-        }
-
-        SetResourceFilePath(file_path);
-    }
+    public:
+        static bool WriteToFile(const AnimationClip& clip, const std::string& path);
+    };
 }
