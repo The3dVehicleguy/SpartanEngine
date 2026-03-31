@@ -56,7 +56,8 @@ namespace spartan
     {
         sol::state lua_state;
         vector<Entity*> entities;
-        vector<Entity*> entities_lights; // entities subset that contains only lights
+        vector<Entity*> entities_lights;       // entities subset that contains only lights
+        vector<Entity*> entities_renderables;  // entities subset that contains only active renderables
         string file_path;
         string world_name; // cached to avoid per-frame allocation
         string world_description;
@@ -726,6 +727,7 @@ namespace spartan
         }
         entities.clear();
         entities_lights.clear();
+        entities_renderables.clear();
         pending_add.clear();
         camera = nullptr;
         light  = nullptr;
@@ -900,6 +902,7 @@ namespace spartan
                 light              = nullptr;
                 audio_source_count = 0;
                 entities_lights.clear();
+                entities_renderables.clear();
                 for (Entity* entity : entities)
                 {
                     if (entity->GetActive())
@@ -918,6 +921,11 @@ namespace spartan
                             entities_lights.push_back(entity);
                         }
 
+                        if (entity->GetComponent<Render>())
+                        {
+                            entities_renderables.push_back(entity);
+                        }
+
                         if (entity->GetComponent<AudioSource>())
                         {
                             audio_source_count++;
@@ -931,7 +939,7 @@ namespace spartan
             entity_states.clear();
         }
 
-        if (Engine::IsFlagSet(EngineMode::Playing))
+        if (Engine::IsFlagSet(EngineMode::Playing) && !Engine::IsFlagSet(EngineMode::Paused))
         {
             DateTime::Tick();
             Game::Tick();
@@ -1394,6 +1402,11 @@ namespace spartan
     const vector<Entity*>& World::GetEntitiesLights()
     {
         return entities_lights;
+    }
+
+    const vector<Entity*>& World::GetEntitiesRenderables()
+    {
+        return entities_renderables;
     }
 
     const string& World::GetName()
