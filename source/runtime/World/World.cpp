@@ -38,6 +38,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../RHI/RHI_Texture.h"
 #include "../Rendering/Renderer.h"
 #include "Components/Physics.h"
+#include "../Physics/PhysicsWorld.h"
 #include "Time/DateTime.h"
 #include "Time/Calendar.h"
 SP_WARNINGS_OFF
@@ -136,7 +137,7 @@ namespace spartan
             hash = (hash * 31) ^ std::hash<float>{}(light->GetColor().g);
             hash = (hash * 31) ^ std::hash<float>{}(light->GetColor().b);
             hash = (hash * 31) ^ std::hash<float>{}(light->GetColor().a);
-            hash = (hash * 31) ^ std::hash<float>{}(light->GetIntensityWatt());
+            hash = (hash * 31) ^ std::hash<float>{}(light->GetIntensityRadiometric());
             hash = (hash * 31) ^ std::hash<float>{}(light->GetRange());
             hash = (hash * 31) ^ std::hash<float>{}(light->GetAngle());
             hash = (hash * 31) ^ std::hash<float>{}(light->GetAreaWidth());
@@ -354,7 +355,20 @@ namespace spartan
             WorldTable["GetDayName"]                = &Calendar::GetDayName;
             WorldTable["GetSeasonName"]             = &Calendar::GetSeasonName;
             WorldTable["GetDayCycleName"]           = &Calendar::GetDayCycleName;
-
+            WorldTable["Raycast"] = [](const Vector3& origin, const Vector3& direction, float max_distance) -> sol::object
+            {
+                Vector3 hit_position;
+                Entity* hit_entity = nullptr;
+                if (PhysicsWorld::RaycastStatic(origin, direction, max_distance, hit_position, hit_entity) && hit_entity)
+                {
+                    sol::state_view lua(lua_state);
+                    sol::table result = lua.create_table();
+                    result["entity"]   = hit_entity;
+                    result["position"] = hit_position;
+                    return result;
+                }
+                return sol::nil;
+            };
 
             lua_state.new_usertype<Vector2>("Vector2",
                 sol::call_constructor,

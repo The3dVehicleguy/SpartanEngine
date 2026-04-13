@@ -460,6 +460,11 @@ namespace spartan
         // todo: implement deletion queue for d3d12
     }
 
+    void RHI_Device::DeletionQueueFlush()
+    {
+        // todo: implement deletion queue for d3d12
+    }
+
     bool RHI_Device::DeletionQueueNeedsToParse()
     {
         return false;
@@ -644,6 +649,11 @@ namespace spartan
     {
         static unordered_map<uint64_t, RHI_DescriptorSet> descriptors;
         return descriptors;
+    }
+
+    uint64_t RHI_Device::GetDescriptorSetFrame()
+    {
+        return 0;
     }
 
     uint64_t RHI_Device::GetBufferDeviceAddress(void* buffer)

@@ -34,6 +34,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 static const float gt7_sdr_paper_white = 250.0f; // cd/m^2
 static const float gt7_ref_luminance   = 100.0f; // cd/m^2 <-> 1.0f
 
+static const float3x3 gt7_rec709_to_rec2020 =
+{
+    { 0.6274040f, 0.3292820f, 0.0433136f },
+    { 0.0690970f, 0.9195400f, 0.0113612f },
+    { 0.0163916f, 0.0880132f, 0.8955950f }
+};
+
+static const float3x3 gt7_rec2020_to_rec709 =
+{
+    { 1.6604910f, -0.5876411f, -0.0728499f },
+    { -0.1245505f, 1.1328999f, -0.0083494f },
+    { -0.0181508f, -0.1005789f, 1.1187297f }
+};
+
 // helper: scene-linear (1.0 = white) -> nits for pq math
 float gt7_fb_to_nits(float fb_value)
 {
@@ -44,6 +58,16 @@ float gt7_fb_to_nits(float fb_value)
 float gt7_nits_to_fb(float physical)
 {
     return physical / gt7_ref_luminance;
+}
+
+float3 gt7_to_rec2020(float3 color)
+{
+    return mul(gt7_rec709_to_rec2020, color);
+}
+
+float3 gt7_to_rec709(float3 color)
+{
+    return mul(gt7_rec2020_to_rec709, color);
 }
 
 // standard smoothstep for blending
@@ -83,7 +107,7 @@ float gt7_eotf(float n)
     const float c3  = 18.6875f;
     const float pqc = 10000.0f;
 
-    float np = pow(max(n, 0.0f), 1.0f / m2);
+    float np = pow(saturate(n), 1.0f / m2);
     float l = max(np - c1, 0.0f);
     l = l / (c2 - c3 * np);
     l = pow(l, 1.0f / m1);
@@ -158,7 +182,7 @@ float gt7_evaluate_curve(float x, float peak_intensity, float mid_point, float t
     // toe (shadows/mids)
     if (x < linear_section * peak_intensity)
     {
-        float toe_mapped = mid_point * pow(max(x / mid_point, 0.0001f), toe_strength);
+        float toe_mapped = mid_point * pow(max(x / mid_point, 0.0f), toe_strength);
         return weight_toe * toe_mapped + weight_linear * x;
     }
 
@@ -170,6 +194,8 @@ float gt7_evaluate_curve(float x, float peak_intensity, float mid_point, float t
 // ----------------------------------------------------------------------------------------------
 float3 gran_turismo_7(float3 rgb, float max_display_nits, bool is_hdr)
 {
+    float3 rgb_rec2020 = gt7_to_rec2020(rgb);
+
     // step a: determine target nits (hdr display or sdr standard)
     float target_nits = is_hdr ? max_display_nits : gt7_sdr_paper_white;
     float fb_target   = gt7_nits_to_fb(target_nits);
@@ -191,14 +217,14 @@ float3 gran_turismo_7(float3 rgb, float max_display_nits, bool is_hdr)
 
     // step b: analyze brightness using ictcp
     float3 ucs;
-    gt7_rgb_to_ictcp(rgb, ucs);
+    gt7_rgb_to_ictcp(rgb_rec2020, ucs);
 
     // step c: path 1 - per-channel mapping (skewed)
     // preserves saturation but shifts hue
     float3 skewed_rgb;
-    skewed_rgb.x = gt7_evaluate_curve(rgb.x, fb_target, mid_point, toe_strength);
-    skewed_rgb.y = gt7_evaluate_curve(rgb.y, fb_target, mid_point, toe_strength);
-    skewed_rgb.z = gt7_evaluate_curve(rgb.z, fb_target, mid_point, toe_strength);
+    skewed_rgb.x = gt7_evaluate_curve(rgb_rec2020.x, fb_target, mid_point, toe_strength);
+    skewed_rgb.y = gt7_evaluate_curve(rgb_rec2020.y, fb_target, mid_point, toe_strength);
+    skewed_rgb.z = gt7_evaluate_curve(rgb_rec2020.z, fb_target, mid_point, toe_strength);
 
     float3 skewed_ucs;
     gt7_rgb_to_ictcp(skewed_rgb, skewed_ucs);
@@ -220,7 +246,12 @@ float3 gran_turismo_7(float3 rgb, float max_display_nits, bool is_hdr)
     float sdr_correction = is_hdr ? 1.0f : (1.0f / gt7_nits_to_fb(gt7_sdr_paper_white));
     out_rgb = sdr_correction * min(out_rgb, fb_target);
 
-    return out_rgb;
+    if (is_hdr)
+    {
+        return max(out_rgb, 0.0f);
+    }
+
+    return max(gt7_to_rec709(out_rgb), 0.0f);
 }
 
 // ==============================================================================================
@@ -323,19 +354,10 @@ float3 aces_nautilus(float3 c)
 // helpers
 // ==============================================================================================
 
-// apply pq curve (st.2084)
+// apply pq curve (st.2084) to rec.2020 linear values
 // input: linear nits normalized to 10,000 (0.0 = 0 nits, 1.0 = 10,000 nits)
-float3 linear_to_hdr10(float3 color)
+float3 linear_rec2020_to_hdr10(float3 color)
 {
-    // convert rec.709 to rec.2020 color space
-    static const float3x3 from709to2020 =
-    {
-        { 0.6274040f, 0.3292820f, 0.0433136f },
-        { 0.0690970f, 0.9195400f, 0.0113612f },
-        { 0.0163916f, 0.0880132f, 0.8955950f }
-    };
-    color = mul(from709to2020, color);
-
     // apply st.2084 (pq curve)
     static const float m1 = 2610.0 / 4096.0 / 4;
     static const float m2 = 2523.0 / 4096.0 * 128;
@@ -348,6 +370,11 @@ float3 linear_to_hdr10(float3 color)
     return color;
 }
 
+float3 linear_rec709_to_hdr10(float3 color)
+{
+    return linear_rec2020_to_hdr10(gt7_to_rec2020(color));
+}
+
 // ==============================================================================================
 // main
 // ==============================================================================================
@@ -356,19 +383,19 @@ float3 linear_to_hdr10(float3 color)
 void main_cs(uint3 thread_id : SV_DispatchThreadID)
 {
     // get input data
-    float3 f3_value            = pass_get_f3_value();
-    uint tone_mapping          = (uint)f3_value.x;
-    float is_auto_exposure     = f3_value.y >= 0.0f;
-    float4 color               = tex[thread_id.xy];
+    float3 f3_value        = pass_get_f3_value();
+    uint tone_mapping      = (uint)f3_value.x;
+    bool is_auto_exposure  = f3_value.y > 0.0f;
+    float4 color           = tex[thread_id.xy];
 
-    // physics: convert watts (radiometric) to nits (photometric)
-    const float luminous_efficacy = 683.0f;
-    color.rgb *= luminous_efficacy; 
+    // the scene buffer stays radiometric until the display path.
+    // convert once here so exposure and tone mapping operate in photometric display space.
+    color.rgb = radiometric_to_photometric(color.rgb);
 
-    // apply exposure (camera and auto-exposure)
-    // applied in nits domain, so physical camera units work correctly
-    float exposure = is_auto_exposure ? tex2.Load(int3(0, 0, 0)).r : 1.0f;
-    color.rgb     *= buffer_frame.camera_exposure * exposure;
+    // apply exposure
+    // auto exposure stores the resolved final scale, while manual mode falls back to the camera settings
+    float exposure = is_auto_exposure ? tex2.Load(int3(0, 0, 0)).r : buffer_frame.camera_exposure;
+    color.rgb     *= exposure;
     
     // check hdr state
     bool is_hdr    = buffer_frame.hdr_enabled != 0.0f;
@@ -410,18 +437,17 @@ void main_cs(uint3 thread_id : SV_DispatchThreadID)
         {
             // gt7 outputs in fb units where 1.0 = 100 nits (gt7_ref_luminance)
             // for hdr, output is already in range [0, fb_target] where fb_target = max_nits / 100
-            // convert to pq normalized range
+            // convert to pq normalized range while staying in rec.2020
             color.rgb = (color.rgb * gt7_ref_luminance) / pq_max_nits;
+            color.rgb = linear_rec2020_to_hdr10(color.rgb);
         }
         else
         {
             // sdr tonemappers output 0-1 where 1.0 = sdr white
             // no tonemapping also uses this since exposure normalizes values to ~1.0 = white
             color.rgb = (color.rgb * sdr_white_nits) / pq_max_nits;
+            color.rgb = linear_rec709_to_hdr10(color.rgb);
         }
-
-        // encode (color space conversion + pq curve)
-        color.rgb = linear_to_hdr10(color.rgb);
     }
     else
     {

@@ -22,6 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //= INCLUDES ========================
 #include "pch.h"
 #include "WorldSelector.h"
+#include "../WorldPreviews.h"
 #include "../GeneralWindows.h"
 #include "../ImGui/ImGui_Extension.h"
 #include "../ImGui/ImGui_Style.h"
@@ -53,9 +54,7 @@ namespace
     {
         { "Car Showroom",      "Showcase world for YouTubers/Press. Does not use experimental tech", "Complete" , "Light",          2100 },
         { "Open World Forest", "256 million of Ghost of Tsushima grass blades",                      "Prototype", "Very demanding", 5600 },
-        { "Liminal Space",     "Shifts your frequency to a nearby reality",                          "Prototype", "Light",          2100 },
         { "Sponza 4K",         "High-resolution textures & meshes",                                  "Complete" , "Demanding",      2600 },
-        { "San Miguel",        "Detailed courtyard scene with complex geometry and lighting",        "Complete" , "Demanding",      2600 },
         { "Basic",             "Cornell box, material ball, light, camera, floor",                   "Complete" , "Light",          2100 },
         { "Empty",             "Light, camera, floor",                                               "Complete" , "Light",          2100 }
     };
@@ -63,7 +62,7 @@ namespace
 
     // discovered world files from disk
     vector<spartan::WorldMetadata> world_files;
-    int selected_index            = 0;
+    int selected_index             = 0;
     bool is_default_world_selected = true;
 
     // visibility states
@@ -98,10 +97,10 @@ namespace
     bool last_click_was_default = true;
 
     // asset download configuration
-    const char* assets_url          = "https://www.dropbox.com/scl/fi/lo0fiz7q4qggn07v2p7r7/project.7z?rlkey=twtmlivihh1rgz640ir85o4pk&st=2qbdrpxi&dl=1";
+    const char* assets_url          = "https://www.dropbox.com/scl/fi/h6eo3g0p7gsvcpn5ep4c3/project.7z?rlkey=wmo3webi76xdz0tjp22otgceh&st=iuep3y7b&dl=1";
     const char* assets_destination  = "project/project.7z";
     const char* assets_extract_dir  = "project/";
-    const char* assets_expected_sha = "ffa63b138a7867d1fb84687533368337f374d91e78330f74542e5c751b45eee5";
+    const char* assets_expected_sha = "20d0f108e700e35e234c68fe2036dac4c800f6ceaefbd8c9dd2b2541c21f13f6";
 
     void scan_directory_recursive(const string& directory)
     {
@@ -290,10 +289,12 @@ namespace
     {
         if (is_default_world_selected)
         {
+            WorldPreviews::RequestGeneration(static_cast<spartan::DefaultWorld>(selected_index));
             spartan::Game::Load(static_cast<spartan::DefaultWorld>(selected_index));
         }
         else if (selected_index >= 0 && selected_index < static_cast<int>(world_files.size()))
         {
+            WorldPreviews::RequestGeneration(world_files[selected_index].file_path);
             spartan::World::LoadFromFile(world_files[selected_index].file_path);
         }
         visible_world_list = false;
@@ -386,23 +387,42 @@ namespace
             // world icon centered in the upper portion
             float icon_area_h = card_h * 0.45f;
             float icon_size   = icon_area_h * 0.6f;
-            if (spartan::RHI_Texture* icon_tex = spartan::ResourceCache::GetIcon(spartan::IconType::World))
+            spartan::RHI_Texture* preview_tex = WorldPreviews::GetTexture(static_cast<spartan::DefaultWorld>(i));
+            spartan::RHI_Texture* icon_tex    = preview_tex ? preview_tex : spartan::ResourceCache::GetIcon(spartan::IconType::World);
+            if (icon_tex)
             {
-                float icon_x = card_min.x + (card_w - icon_size) * 0.5f;
-                float icon_y = card_min.y + card_padding + (icon_area_h - icon_size) * 0.5f;
+                if (preview_tex)
+                {
+                    float image_x = card_min.x + card_padding;
+                    float image_y = card_min.y + card_padding;
+                    float image_w = card_w - card_padding * 2.0f;
+                    float image_h = icon_area_h - card_padding * 0.5f;
 
-                // vram warning: tint the icon red if system vram is insufficient
-                uint64_t system_vram = spartan::RHI_Device::MemoryGetTotalMb();
-                ImU32 icon_tint = (system_vram < default_worlds[i].vram)
-                    ? IM_COL32(255, 100, 100, 220)
-                    : IM_COL32(255, 255, 255, 200);
+                    draw_list->AddImage(
+                        reinterpret_cast<ImTextureID>(icon_tex),
+                        ImVec2(image_x, image_y),
+                        ImVec2(image_x + image_w, image_y + image_h),
+                        ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 255)
+                    );
+                }
+                else
+                {
+                    float icon_x = card_min.x + (card_w - icon_size) * 0.5f;
+                    float icon_y = card_min.y + card_padding + (icon_area_h - icon_size) * 0.5f;
 
-                draw_list->AddImage(
-                    reinterpret_cast<ImTextureID>(icon_tex),
-                    ImVec2(icon_x, icon_y),
-                    ImVec2(icon_x + icon_size, icon_y + icon_size),
-                    ImVec2(0, 0), ImVec2(1, 1), icon_tint
-                );
+                    // vram warning: tint the icon red if system vram is insufficient
+                    uint64_t system_vram = spartan::RHI_Device::MemoryGetTotalMb();
+                    ImU32 icon_tint = (system_vram < default_worlds[i].vram)
+                        ? IM_COL32(255, 100, 100, 220)
+                        : IM_COL32(255, 255, 255, 200);
+
+                    draw_list->AddImage(
+                        reinterpret_cast<ImTextureID>(icon_tex),
+                        ImVec2(icon_x, icon_y),
+                        ImVec2(icon_x + icon_size, icon_y + icon_size),
+                        ImVec2(0, 0), ImVec2(1, 1), icon_tint
+                    );
+                }
             }
 
             // world name centered below icon area (smaller font)
@@ -531,16 +551,35 @@ namespace
             // world icon
             float icon_area_h = card_h * 0.5f;
             float icon_size   = icon_area_h * 0.55f;
-            if (spartan::RHI_Texture* icon_tex = spartan::ResourceCache::GetIcon(spartan::IconType::World))
+            spartan::RHI_Texture* preview_tex = WorldPreviews::GetTexture(world_files[i].file_path);
+            spartan::RHI_Texture* icon_tex    = preview_tex ? preview_tex : spartan::ResourceCache::GetIcon(spartan::IconType::World);
+            if (icon_tex)
             {
-                float icon_x = card_min.x + (card_w - icon_size) * 0.5f;
-                float icon_y = card_min.y + card_padding + (icon_area_h - icon_size) * 0.5f;
-                draw_list->AddImage(
-                    reinterpret_cast<ImTextureID>(icon_tex),
-                    ImVec2(icon_x, icon_y),
-                    ImVec2(icon_x + icon_size, icon_y + icon_size),
-                    ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 200)
-                );
+                if (preview_tex)
+                {
+                    float image_x = card_min.x + card_padding;
+                    float image_y = card_min.y + card_padding;
+                    float image_w = card_w - card_padding * 2.0f;
+                    float image_h = icon_area_h - card_padding * 0.5f;
+
+                    draw_list->AddImage(
+                        reinterpret_cast<ImTextureID>(icon_tex),
+                        ImVec2(image_x, image_y),
+                        ImVec2(image_x + image_w, image_y + image_h),
+                        ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 255)
+                    );
+                }
+                else
+                {
+                    float icon_x = card_min.x + (card_w - icon_size) * 0.5f;
+                    float icon_y = card_min.y + card_padding + (icon_area_h - icon_size) * 0.5f;
+                    draw_list->AddImage(
+                        reinterpret_cast<ImTextureID>(icon_tex),
+                        ImVec2(icon_x, icon_y),
+                        ImVec2(icon_x + icon_size, icon_y + icon_size),
+                        ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, 200)
+                    );
+                }
             }
 
             // clip all text to the card bounds

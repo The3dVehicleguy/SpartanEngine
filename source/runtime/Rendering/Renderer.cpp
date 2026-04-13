@@ -30,6 +30,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Core/Debugging.h"
 #include "../Core/Window.h"
 #include "../Core/Timer.h"
+#include "../FileSystem/FileSystem.h"
 #include "../Input/Input.h"
 #include "../Display/Display.h"
 #include "../RHI/RHI_Device.h"
@@ -110,13 +111,18 @@ namespace spartan
         float far_plane                      = 1.0f;
         bool dirty_orthographic_projection   = true;
 
+        float sanitize_resolution_scale(float scale)
+        {
+            return clamp(scale, 0.5f, 1.0f);
+        }
+
         void dynamic_resolution()
         {
             if (cvar_dynamic_resolution.GetValue() != 0.0f)
             {
                 float gpu_time_target   = 16.67f;                                               // target for 60 FPS
                 float adjustment_factor = static_cast<float>(0.05f * Timer::GetDeltaTimeSec()); // how aggressively to adjust screen percentage
-                float screen_percentage = cvar_resolution_scale.GetValue();
+                float screen_percentage = Renderer::GetResolutionScale();
                 float gpu_time          = Profiler::GetTimeGpuLast();
 
                 if (gpu_time < gpu_time_target) // gpu is under target, increase resolution
@@ -128,9 +134,7 @@ namespace spartan
                     screen_percentage -= adjustment_factor * (gpu_time - gpu_time_target);
                 }
 
-                // clamp screen_percentage to a reasonable range
-                screen_percentage = clamp(screen_percentage, 0.5f, 1.0f);
-
+                screen_percentage = sanitize_resolution_scale(screen_percentage);
                 ConsoleRegistry::Get().SetValueFromString("r.resolution_scale", to_string(screen_percentage));
             }
         }
@@ -237,8 +241,6 @@ namespace spartan
 
         RHI_CommandList::ImmediateExecutionShutdown();
 
-        RHI_VendorTechnology::NRD_Shutdown();
-
         {
             DestroyResources();
             GeometryBuffer::Shutdown();
@@ -263,10 +265,17 @@ namespace spartan
     {
         Profiler::FrameStart();
 
+        // process deferred fullscreen toggle at a safe point where no command lists are in flight
+        if (Window::IsFullScreenTogglePending())
+        {
+            RHI_Device::QueueWaitAll();
+            Window::ProcessFullScreenToggle();
+        }
+
         {
             swapchain->AcquireNextImage();
             RHI_Device::Tick(frame_num);
-            RHI_VendorTechnology::Tick(&m_cb_frame_cpu, GetResolutionRender(), GetResolutionOutput(), cvar_resolution_scale.GetValue());
+            RHI_VendorTechnology::Tick(&m_cb_frame_cpu, GetResolutionRender(), GetResolutionOutput(), GetResolutionScale());
             dynamic_resolution();
 
             // breadcrumbs
@@ -279,16 +288,19 @@ namespace spartan
         // recreate optional render targets when feature cvars change
         if (m_initialized_resources)
         {
-            static uint32_t options_hash = 0;
-            uint32_t options_hash_new    = (cvar_ssao.GetValueAs<bool>() << 0) | (cvar_ray_traced_reflections.GetValueAs<bool>() << 1) | (cvar_restir_pt.GetValueAs<bool>() << 2);
-            
-            if (options_hash_new != options_hash)
+            static uint32_t options_hash  = 0;
+            static float restir_scale_old = -1.0f;
+            uint32_t options_hash_new     = (cvar_ssao.GetValueAs<bool>() << 0) | (cvar_ray_traced_reflections.GetValueAs<bool>() << 1) | (cvar_restir_pt.GetValueAs<bool>() << 2);
+            float restir_scale_new        = cvar_restir_pt_scale.GetValue();
+
+            if (options_hash_new != options_hash || restir_scale_new != restir_scale_old)
             {
                 RHI_Device::QueueWaitAll(true);
                 RHI_Device::DeletionQueueParse();
                 UpdateOptionalRenderTargets();
                 RHI_Device::DeletionQueueParse();
-                options_hash = options_hash_new;
+                options_hash    = options_hash_new;
+                restir_scale_old = restir_scale_new;
             }
         }
     
@@ -597,6 +609,29 @@ namespace spartan
             }
 
             CreateRenderTargets(create_render, create_output, true);
+
+            RHI_Device::DeletionQueueFlush();
+
+            // after recreation the gpu is idle and all images sit in their initial layout
+            // (general or undefined), but the per-texture layout tracking may still hold the
+            // layout from the last frame (e.g. shader_read).  resetting to Max (unknown)
+            // forces the next InsertBarrier to emit an Undefined -> target transition, which
+            // the spec guarantees is always valid regardless of the actual gpu-side layout.
+            for (uint32_t i = 0; i < static_cast<uint32_t>(Renderer_RenderTarget::max); i++)
+            {
+                if (RHI_Texture* rt = GetRenderTarget(static_cast<Renderer_RenderTarget>(i)))
+                {
+                    rt->ClearLayouts();
+                }
+            }
+
+            // the layout reset above invalidates one-shot render targets (luts, cloud noise,
+            // skysphere) because the Undefined transition discards their contents
+            m_pass_state.brdf_lut_produced      = false;
+            m_pass_state.atmosphere_lut_produced = false;
+            m_pass_state.cloud_noise_produced    = false;
+            m_pass_state.sky_first_frame         = true;
+
             CreateSamplers();
         }
 
@@ -620,6 +655,17 @@ namespace spartan
         {
             Display::RegisterDisplayMode(width, height, Timer::GetFpsLimit(), Display::GetId());
         }
+    }
+
+    float Renderer::GetResolutionScale()
+    {
+        return sanitize_resolution_scale(cvar_resolution_scale.GetValue());
+    }
+
+    uint32_t Renderer::GetScaledDimension(uint32_t dimension, float scale /*= -1.0f*/)
+    {
+        scale = scale < 0.0f ? GetResolutionScale() : sanitize_resolution_scale(scale);
+        return max(static_cast<uint32_t>(static_cast<float>(dimension) * scale), 1u);
     }
 
     void Renderer::RecreateRenderTargets()
@@ -708,7 +754,9 @@ namespace spartan
         m_cb_frame_cpu.time                = Timer::GetTimeSec();
         m_cb_frame_cpu.delta_time          = static_cast<float>(Timer::GetDeltaTimeSec());
         m_cb_frame_cpu.frame               = static_cast<uint32_t>(frame_num);
-        m_cb_frame_cpu.resolution_scale    = cvar_resolution_scale.GetValue();
+        m_cb_frame_cpu.resolution_scale    = GetResolutionScale();
+        m_cb_frame_cpu.restir_pt_scale     = cvar_restir_pt_scale.GetValue();
+        m_cb_frame_cpu.restir_pt_debug_mode = cvar_restir_pt_debug_mode.GetValue();
         m_cb_frame_cpu.hdr_enabled         = cvar_hdr.GetValueAs<bool>() ? 1.0f : 0.0f;
         m_cb_frame_cpu.hdr_max_nits        = Display::GetLuminanceMax();
         m_cb_frame_cpu.gamma               = cvar_gamma.GetValue();
@@ -716,6 +764,7 @@ namespace spartan
 
         m_cb_frame_cpu.cloud_coverage = cvar_cloud_coverage.GetValue();
         m_cb_frame_cpu.cloud_shadows  = cvar_cloud_shadows.GetValue();
+        m_cb_frame_cpu.restir_pt_light_count = static_cast<float>(m_count_active_lights);
         m_cb_frame_cpu.wind           = World::GetWind();
         // feature bits (must match common_resources.hlsl)
         m_cb_frame_cpu.set_bit(cvar_ray_traced_reflections.GetValueAs<bool>(), 1 << 0);
@@ -774,10 +823,10 @@ namespace spartan
 
             width_previous_viewport  = m_viewport.width;
             height_previous_viewport = m_viewport.height;
-            SetViewport(static_cast<float>(width), static_cast<float>(height));
+            width_previous_output    = static_cast<uint32_t>(GetResolutionOutput().x);
+            height_previous_output   = static_cast<uint32_t>(GetResolutionOutput().y);
 
-            width_previous_output  = static_cast<uint32_t>(m_viewport.width);
-            height_previous_output = static_cast<uint32_t>(m_viewport.height);
+            SetViewport(static_cast<float>(width), static_cast<float>(height));
             SetResolutionOutput(width, height);
         }
         else
@@ -945,6 +994,7 @@ namespace spartan
                 properties[count].sheen                 = material->GetProperty(MaterialProperty::Sheen);
                 properties[count].subsurface_scattering = material->GetProperty(MaterialProperty::SubsurfaceScattering);
                 properties[count].world_space_uv        = material->GetProperty(MaterialProperty::WorldSpaceUv);
+                properties[count].uv_rotation           = material->GetProperty(MaterialProperty::TextureRotation);
 
                 // flags
                 properties[count].flags  = material->HasTextureOfType(MaterialTextureType::Height)             ? (1U << 0)  : 0;
@@ -1031,9 +1081,13 @@ namespace spartan
             {
                 light_buffer_entry.transform[i] = light_component->GetViewProjectionMatrix(i);
             }
-    
-            light_buffer_entry.screen_space_shadow_slice_index   = light_component->GetScreenSpaceShadowsSliceIndex();
-            light_buffer_entry.intensity                         = light_component->GetIntensityWatt();
+
+            const bool has_screen_space_shadows                  = light_component->GetLightType() == LightType::Directional &&
+                                                                    light_component->GetFlag(LightFlags::Shadows) &&
+                                                                    light_component->GetFlag(LightFlags::ShadowsScreenSpace);
+
+            light_buffer_entry.screen_space_shadow_slice_index   = has_screen_space_shadows ? light_component->GetScreenSpaceShadowsSliceIndex() : 0;
+            light_buffer_entry.intensity                         = light_component->GetIntensityRadiometric();
             light_buffer_entry.range                             = light_component->GetRange();
             light_buffer_entry.angle                             = light_component->GetAngle();
             light_buffer_entry.color                             = light_component->GetColor();
@@ -1046,7 +1100,7 @@ namespace spartan
             light_buffer_entry.flags                            |= light_component->GetLightType() == LightType::Point       ? (1 << 1) : 0;
             light_buffer_entry.flags                            |= light_component->GetLightType() == LightType::Spot        ? (1 << 2) : 0;
             light_buffer_entry.flags                            |= light_component->GetFlag(LightFlags::Shadows)             ? (1 << 3) : 0;
-            light_buffer_entry.flags                            |= light_component->GetFlag(LightFlags::ShadowsScreenSpace)  ? (1 << 4) : 0;
+            light_buffer_entry.flags                            |= has_screen_space_shadows                                  ? (1 << 4) : 0;
             light_buffer_entry.flags                            |= light_component->GetFlag(LightFlags::Volumetric)          ? (1 << 5) : 0;
             light_buffer_entry.flags                            |= light_component->GetLightType() == LightType::Area        ? (1 << 6) : 0;
     
@@ -1101,7 +1155,7 @@ namespace spartan
                 if (!light_component->GetEntity()->GetActive())
                     continue;
     
-                if (light_component->GetIntensityWatt() <= 0.0f)
+                if (light_component->GetIntensityRadiometric() <= 0.0f)
                     continue;
     
                 if (Camera* camera = World::GetCamera())
@@ -1585,11 +1639,9 @@ namespace spartan
         }
     }
 
-    void Renderer::Screenshot()
+    static void screenshot_internal(string file_path = "")
     {
-        static uint32_t screenshot_index = 0;
-
-        RHI_Texture* frame_output = GetRenderTarget(Renderer_RenderTarget::frame_output);
+        RHI_Texture* frame_output = Renderer::GetRenderTarget(Renderer_RenderTarget::frame_output);
         uint32_t width            = frame_output->GetWidth();
         uint32_t height           = frame_output->GetHeight();
         uint32_t bits_per_channel = frame_output->GetBitsPerChannel();
@@ -1609,20 +1661,53 @@ namespace spartan
         void* mapped_data = staging->GetMappedData();
         SP_ASSERT_MSG(mapped_data, "Staging buffer not mappable");
 
-        uint32_t index = screenshot_index++;
-        string exr_path = "screenshot_" + to_string(index) + ".exr";
-        string png_path = "screenshot_" + to_string(index) + ".png";
-
         spartan::ThreadPool::AddTask([=]()
         {
+            if (!file_path.empty())
+            {
+                string directory = FileSystem::GetDirectoryFromFilePath(file_path);
+                if (!directory.empty() && !FileSystem::Exists(directory))
+                {
+                    FileSystem::CreateDirectory_(directory);
+                }
+
+                string temp_file_path = file_path + ".tmp";
+                if (FileSystem::Exists(temp_file_path))
+                {
+                    FileSystem::Delete(temp_file_path);
+                }
+
+                SP_LOG_INFO("Saving screenshot to '%s'...", file_path.c_str());
+                ImageImporter::SaveSdr(temp_file_path, width, height, channel_count, bits_per_channel, mapped_data, is_hdr);
+                if (FileSystem::Exists(file_path))
+                {
+                    FileSystem::Delete(file_path);
+                }
+                FileSystem::Rename(temp_file_path, file_path);
+                SP_LOG_INFO("Screenshot saved as '%s'", file_path.c_str());
+                return;
+            }
+
+            static uint32_t screenshot_index = 0;
+            uint32_t index = screenshot_index++;
+            string exr_path = "screenshot_" + to_string(index) + ".exr";
+            string png_path = "screenshot_" + to_string(index) + ".png";
+
             SP_LOG_INFO("Saving screenshots...");
-
             ImageImporter::Save(exr_path, width, height, channel_count, bits_per_channel, mapped_data);
-
             ImageImporter::SaveSdr(png_path, width, height, channel_count, bits_per_channel, mapped_data, is_hdr);
-
             SP_LOG_INFO("Screenshots saved as '%s' and '%s'", exr_path.c_str(), png_path.c_str());
         });
+    }
+
+    void Renderer::Screenshot()
+    {
+        screenshot_internal();
+    }
+
+    void Renderer::Screenshot(const string& file_path)
+    {
+        screenshot_internal(file_path);
     }
 
     RHI_AccelerationStructure* Renderer::GetTopLevelAccelerationStructure()

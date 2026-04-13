@@ -23,6 +23,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 //= INCLUDES ======================
 #include "Component.h"
+#include <algorithm>
 #include <memory>
 #include <vector>
 #include "../../RHI/RHI_Viewport.h"
@@ -93,30 +94,30 @@ namespace spartan
         math::Vector3 ScreenToWorldCoordinates(const math::Vector2& position_screen, const float z) const;
 
         // aperture
-        float GetAperture() const              { return m_aperture; }
-        void SetAperture(const float aperture) { m_aperture = aperture; }
+        float GetAperture() const                     { return m_aperture; }
+        void SetAperture(const float aperture)        { m_aperture = std::max(aperture, 0.01f); }
 
         // shutter speed
-        float GetShutterSpeed() const                   { return m_shutter_speed; }
-        void SetShutterSpeed(const float shutter_speed) { m_shutter_speed = shutter_speed; }
+        float GetShutterSpeed() const                  { return m_shutter_speed; }
+        void SetShutterSpeed(const float shutter_speed){ m_shutter_speed = std::max(shutter_speed, 0.0001f); }
 
         // iso
-        float GetIso() const         { return m_iso; }
-        void SetIso(const float iso) { m_iso = iso; }
+        float GetIso() const                    { return m_iso; }
+        void SetIso(const float iso)            { m_iso = std::max(iso, 1.0f); }
 
         float GetExposure() const
         {
-            // computed ev (using squared aperture for photometric accuracy)
-            // note: this calculates the exposure scale factor (1/l_avg)
-            float ev100 = std::log2((m_aperture * m_aperture) / m_shutter_speed * 100.0f / m_iso);
-        
-            // standard standard output sensitivity (sos) calculation
-            // 1.2 is a common calibration constant (matches ue5/frostbite)
-            // this maps the average scene luminance to middle grey (0.18)
+            const float aperture = std::max(m_aperture, 0.01f);
+            const float shutter  = std::max(m_shutter_speed, 0.0001f);
+            const float iso      = std::max(m_iso, 1.0f);
+
+            // compute ev100 from the physical camera controls.
+            float ev100 = std::log2((aperture * aperture) / shutter * (100.0f / iso));
+
+            // convert ev100 to a scene-linear exposure scale with the standard
+            // saturation-based speed constant used by physically based cameras.
             const float calibration_constant = 1.2f;
-            float base_exposure = 1.0f / (calibration_constant * std::pow(2.0f, ev100));
-        
-            return base_exposure;
+            return 1.0f / (calibration_constant * std::exp2(ev100));
         }
 
         // planes/projection
@@ -196,6 +197,7 @@ namespace spartan
         math::Quaternion m_lerp_to_target_rotation   = math::Quaternion::Identity;
         math::Vector3 m_lerp_from_position           = math::Vector3::Zero;
         math::Quaternion m_lerp_from_rotation        = math::Quaternion::Identity;
+        bool m_was_playing                           = false;
         Entity* m_flashlight                         = nullptr;
         RHI_Viewport m_last_known_viewport;
         math::Frustum m_frustum;

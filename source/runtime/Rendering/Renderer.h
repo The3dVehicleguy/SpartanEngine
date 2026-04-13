@@ -32,6 +32,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "../Commands/Console/ConsoleCommands.h"
 #include <unordered_map>
 #include <atomic>
+#include <string>
 #include "../Math/Rectangle.h"
 //==============================================
 
@@ -65,6 +66,8 @@ namespace spartan
     extern TConsoleVar<float> cvar_ray_traced_reflections;
     extern TConsoleVar<float> cvar_ray_traced_shadows;
     extern TConsoleVar<float> cvar_restir_pt;
+    extern TConsoleVar<float> cvar_restir_pt_scale;
+    extern TConsoleVar<float> cvar_restir_pt_debug_mode;
     extern TConsoleVar<float> cvar_motion_blur;
     extern TConsoleVar<float> cvar_depth_of_field;
     extern TConsoleVar<float> cvar_film_grain;
@@ -134,6 +137,7 @@ namespace spartan
         static uint64_t GetFrameNumber();
         static RHI_Api_Type GetRhiApiType();
         static void Screenshot();
+        static void Screenshot(const std::string& file_path);
         static RHI_CommandList* GetCommandListPresent() { return m_cmd_list_present; }
 
         // write a draw data entry and return its index
@@ -154,6 +158,8 @@ namespace spartan
         // resolution output
         static const math::Vector2& GetResolutionOutput();
         static void SetResolutionOutput(uint32_t width, uint32_t height, bool recreate_resources = true);
+        static float GetResolutionScale();
+        static uint32_t GetScaledDimension(uint32_t dimension, float scale = -1.0f);
 
         // force render target recreation (e.g. when xr stereo mode changes)
         static void RecreateRenderTargets();
@@ -210,7 +216,7 @@ namespace spartan
         static void Pass_RayTracedReflections(RHI_CommandList* cmd_list, uint32_t eye_layer = rhi_all_mips);
         static void Pass_RayTracedShadows(RHI_CommandList* cmd_list);
         static void Pass_ReSTIR_PathTracing(RHI_CommandList* cmd_list);
-        static void Pass_Denoiser(RHI_CommandList* cmd_list, RHI_Texture* tex_in, RHI_Texture* tex_out);
+        static void Pass_ReSTIR_Denoising(RHI_CommandList* cmd_list);
         static void Pass_Light_Reflections(RHI_CommandList* cmd_list, uint32_t eye_layer = rhi_all_mips);
         static void Pass_ScreenSpaceShadows(RHI_CommandList* cmd_list);
         static void Pass_Skysphere(RHI_CommandList* cmd_list);

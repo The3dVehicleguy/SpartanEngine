@@ -162,9 +162,9 @@ float compute_adaptive_radius(float linear_depth, float center_roughness, float 
     return base_radius * roughness_factor * edge_factor * grazing_factor * distance_reduction;
 }
 
-float compute_edge_factor(float2 uv, float linear_depth, float2 resolution)
+float compute_edge_factor(float2 uv, float linear_depth, float2 screen_resolution)
 {
-    float2 texel     = 1.0f / resolution;
+    float2 texel     = 1.0f / screen_resolution;
     float depth_left  = linearize_depth(tex_depth.SampleLevel(GET_SAMPLER(sampler_point_clamp), uv + float2(-texel.x, 0), 0).r);
     float depth_right = linearize_depth(tex_depth.SampleLevel(GET_SAMPLER(sampler_point_clamp), uv + float2(texel.x, 0), 0).r);
     float depth_up    = linearize_depth(tex_depth.SampleLevel(GET_SAMPLER(sampler_point_clamp), uv + float2(0, -texel.y), 0).r);
@@ -180,9 +180,11 @@ float compute_edge_factor(float2 uv, float linear_depth, float2 resolution)
 void main_cs(uint3 dispatch_id : SV_DispatchThreadID)
 {
     uint2 pixel = dispatch_id.xy;
-    float2 resolution = buffer_frame.resolution_render;
+    uint resolution_x, resolution_y;
+    tex_uav.GetDimensions(resolution_x, resolution_y);
+    float2 resolution = float2(resolution_x, resolution_y);
 
-    if (pixel.x >= (uint)resolution.x || pixel.y >= (uint)resolution.y)
+    if (pixel.x >= resolution_x || pixel.y >= resolution_y)
         return;
 
     float2 uv = (pixel + 0.5f) / resolution;
@@ -212,33 +214,30 @@ void main_cs(uint3 dispatch_id : SV_DispatchThreadID)
     if (!is_reservoir_valid(center))
         center = create_empty_reservoir();
 
-    uint seed = create_seed_for_pass(pixel, buffer_frame.frame, 2);
+    uint spatial_pass_index = (uint)pass_get_f3_value().x;
+    uint seed = create_seed_for_pass(pixel, buffer_frame.frame, 2 + spatial_pass_index);
+    float center_confidence = saturate(center.confidence);
 
-    float edge_factor     = compute_edge_factor(uv, linear_depth, resolution);
+    float edge_factor     = compute_edge_factor(uv, linear_depth, buffer_frame.resolution_render);
     float adaptive_radius = compute_adaptive_radius(linear_depth, roughness, edge_factor, normal_ws, view_dir);
+    adaptive_radius      *= lerp(0.35f, 1.0f, center_confidence);
+
+    // second pass uses a wider radius, but only when the center reservoir is trustworthy
+    if (spatial_pass_index > 0)
+        adaptive_radius *= lerp(1.05f, 1.5f, center_confidence);
 
     Reservoir combined = create_empty_reservoir();
+    float reuse_weight_sum = 0.0f;
 
-    float target_pdf_center;
-    if (is_sky_sample(center.sample))
-    {
-        target_pdf_center = calculate_target_pdf_sky(center.sample.radiance,
-            center.sample.direction, normal_ws, view_dir, albedo, roughness, metallic);
-    }
-    else
-    {
-        target_pdf_center = calculate_target_pdf_with_geometry(center.sample.radiance,
-            pos_ws, normal_ws, view_dir, center.sample.hit_position, center.sample.hit_normal,
-            albedo, roughness, metallic);
-    }
-    if (target_pdf_center <= 0.0f)
-        target_pdf_center = calculate_target_pdf(center.sample.radiance);
+    float target_pdf_center = calculate_target_pdf_for_sample(center.sample, pos_ws, normal_ws, view_dir, albedo, roughness, metallic);
 
-    float weight_center = target_pdf_center * center.W * center.M;
+    float weight_center = compute_reservoir_stream_weight(target_pdf_center, center.W, center.M);
     combined.weight_sum = weight_center;
     combined.M          = center.M;
     combined.sample     = center.sample;
     combined.target_pdf = target_pdf_center;
+    float confidence_weight_sum   = center_confidence * max(weight_center, 0.0f);
+    float confidence_weight_total = max(weight_center, 0.0f);
 
     float base_angle = random_float(seed) * 2.0f * PI;
 
@@ -263,6 +262,13 @@ void main_cs(uint3 dispatch_id : SV_DispatchThreadID)
 
         float2 neighbor_uv     = (neighbor_pixel + 0.5f) / resolution;
         float3 neighbor_pos_ws = get_position(neighbor_uv);
+        float4 neighbor_material = tex_material.SampleLevel(GET_SAMPLER(sampler_point_clamp), neighbor_uv, 0);
+        float3 neighbor_albedo   = saturate(tex_albedo.SampleLevel(GET_SAMPLER(sampler_point_clamp), neighbor_uv, 0).rgb);
+        float neighbor_roughness = max(neighbor_material.r, RESTIR_MIN_ROUGHNESS);
+        float neighbor_metallic  = neighbor_material.g;
+
+        if (!are_materials_compatible(albedo, roughness, metallic, neighbor_albedo, neighbor_roughness, neighbor_metallic))
+            continue;
 
         Reservoir neighbor = unpack_reservoir(
             tex_reservoir_prev0[neighbor_pixel],
@@ -278,12 +284,12 @@ void main_cs(uint3 dispatch_id : SV_DispatchThreadID)
         if (neighbor.M <= 0 || neighbor.W <= 0)
             continue;
 
-        if (all(neighbor.sample.radiance <= 0.0f))
+        float neighbor_confidence = saturate(neighbor.confidence);
+        if (neighbor_confidence <= 0.1f)
             continue;
 
-        float nb_lum = dot(neighbor.sample.radiance, float3(0.299f, 0.587f, 0.114f));
-        if (nb_lum > 50.0f)
-            neighbor.sample.radiance *= 50.0f / nb_lum;
+        if (all(neighbor.sample.radiance <= 0.0f))
+            continue;
 
         float target_pdf_at_center = 0.0f;
         float jacobian = 1.0f;
@@ -294,8 +300,7 @@ void main_cs(uint3 dispatch_id : SV_DispatchThreadID)
             if (n_dot_sky <= 0.0f)
                 continue;
 
-            target_pdf_at_center = calculate_target_pdf_sky(neighbor.sample.radiance,
-                neighbor.sample.direction, normal_ws, view_dir, albedo, roughness, metallic);
+            target_pdf_at_center = calculate_target_pdf_for_sample(neighbor.sample, pos_ws, normal_ws, view_dir, albedo, roughness, metallic);
             jacobian = 1.0f;
         }
         else
@@ -316,19 +321,26 @@ void main_cs(uint3 dispatch_id : SV_DispatchThreadID)
             if (jacobian <= 0.0f)
                 continue;
 
-            target_pdf_at_center = calculate_target_pdf_with_geometry(neighbor.sample.radiance,
-                pos_ws, normal_ws, view_dir, neighbor.sample.hit_position, neighbor.sample.hit_normal,
-                albedo, roughness, metallic);
+            target_pdf_at_center = calculate_target_pdf_for_sample(neighbor.sample, pos_ws, normal_ws, view_dir, albedo, roughness, metallic);
         }
 
         if (target_pdf_at_center <= 0.0f)
             continue;
 
-        float effective_M = min(neighbor.M, max(center.M * 2.0f, 4.0f));
-        float weight = target_pdf_at_center * jacobian * neighbor.W * effective_M;
+        float reuse_confidence = (spatial_pass_index > 0) ? min(center_confidence, neighbor_confidence) : neighbor_confidence;
+        if (reuse_confidence <= 0.05f)
+            continue;
+
+        float neighbor_m_cap = max(center.M * lerp(1.25f, 1.75f, center_confidence), 2.0f);
+        float effective_M = min(neighbor.M * reuse_confidence, neighbor_m_cap);
+        float base_weight = compute_reservoir_stream_weight(target_pdf_at_center, neighbor.W, effective_M);
+        float weight = jacobian * base_weight;
 
         combined.weight_sum += weight;
         combined.M += effective_M;
+        reuse_weight_sum       += weight;
+        confidence_weight_sum   += neighbor_confidence * max(weight, 0.0f);
+        confidence_weight_total += max(weight, 0.0f);
 
         if (random_float(seed) * combined.weight_sum < weight)
         {
@@ -339,32 +351,10 @@ void main_cs(uint3 dispatch_id : SV_DispatchThreadID)
 
     clamp_reservoir_M(combined, RESTIR_M_CAP);
 
-    float final_target_pdf;
-    if (is_sky_sample(combined.sample))
-    {
-        final_target_pdf = calculate_target_pdf_sky(combined.sample.radiance,
-            combined.sample.direction, normal_ws, view_dir, albedo, roughness, metallic);
-    }
-    else
-    {
-        final_target_pdf = calculate_target_pdf_with_geometry(combined.sample.radiance,
-            pos_ws, normal_ws, view_dir, combined.sample.hit_position, combined.sample.hit_normal,
-            albedo, roughness, metallic);
-    }
-    if (final_target_pdf <= 0.0f)
-        final_target_pdf = calculate_target_pdf(combined.sample.radiance);
-    combined.target_pdf = final_target_pdf;
+    float final_target_pdf = calculate_target_pdf_for_sample(combined.sample, pos_ws, normal_ws, view_dir, albedo, roughness, metallic);
+    finalize_reservoir_with_target(combined, final_target_pdf);
 
-    if (final_target_pdf > 0 && combined.M > 0)
-        combined.W = combined.weight_sum / (final_target_pdf * combined.M);
-    else
-        combined.W = 0;
-
-    float w_clamp = get_w_clamp_for_sample(combined.sample);
-    combined.W = min(combined.W, w_clamp);
-
-    float neighbor_contribution = (combined.M > center.M) ? saturate((combined.M - center.M) / combined.M) : 0.0f;
-    combined.confidence = lerp(center.confidence, 1.0f, neighbor_contribution * 0.5f);
+    combined.confidence = confidence_weight_total > 0.0f ? saturate(confidence_weight_sum / confidence_weight_total) : 0.0f;
 
     float4 t0, t1, t2, t3, t4;
     pack_reservoir(combined, t0, t1, t2, t3, t4);
@@ -374,8 +364,10 @@ void main_cs(uint3 dispatch_id : SV_DispatchThreadID)
     tex_reservoir3[pixel] = t3;
     tex_reservoir4[pixel] = t4;
 
-    float3 gi = combined.sample.radiance * combined.W;
-    gi = soft_clamp_gi(gi, combined.sample);
+    float reuse_ratio = combined.weight_sum > 0.0f ? saturate(reuse_weight_sum / combined.weight_sum) : 0.0f;
+    float3 gi = get_restir_pt_debug_mode() == RESTIR_DEBUG_MODE_TEMPORAL_REJECTION
+        ? tex_uav[pixel].rgb
+        : get_restir_debug_visualization(combined, reuse_ratio);
 
     tex_uav[pixel] = float4(gi, 1.0f);
 }

@@ -1,3 +1,4 @@
+
 /*
 Copyright(c) 2015-2026 Panos Karabelas
 
@@ -260,6 +261,11 @@ namespace spartan
         const bool is_playing  = Engine::IsFlagSet(EngineMode::Playing);
         const float delta_time = static_cast<float>(Timer::GetDeltaTimeSec());
 
+        if (!is_playing)
+        {
+            UpdateShapeGeometry();
+        }
+
         switch (m_body_type)
         {
             case BodyType::Controller:
@@ -278,6 +284,16 @@ namespace spartan
                 if (!m_is_static)
                 {
                     TickDynamicBodies(is_playing);
+                }
+                else if (!is_playing)
+                {
+                    for (uint32_t i = 0; i < static_cast<uint32_t>(m_actors.size()); i++)
+                    {
+                        if (PxRigidActor* actor = static_cast<PxRigidActor*>(m_actors[i]))
+                        {
+                            actor->setGlobalPose(to_px_transform(GetEntity()->GetMatrix()));
+                        }
+                    }
                 }
                 break;
         }
@@ -749,7 +765,12 @@ namespace spartan
             "GetClothIterations",           &Physics::GetClothIterations,
             "SetClothIterations",           &Physics::SetClothIterations,
             "GetClothWindEnabled",          &Physics::GetClothWindEnabled,
-            "SetClothWindEnabled",          &Physics::SetClothWindEnabled
+            "SetClothWindEnabled",          &Physics::SetClothWindEnabled,
+
+            "IsGrounded",                   &Physics::IsGrounded,
+            "GetGroundEntity",              &Physics::GetGroundEntity,
+            "GetBodyType",                  &Physics::GetBodyType,
+            "IsStatic",                     &Physics::IsStatic
             );
 
     }
@@ -2715,6 +2736,52 @@ namespace spartan
             }
 
             CreateBodies();
+            m_scale_previous = GetEntity()->GetScale();
+        }
+    }
+
+    void Physics::UpdateShapeGeometry()
+    {
+        Vector3 scale = GetEntity()->GetScale();
+        if (scale == m_scale_previous)
+            return;
+
+        m_scale_previous = scale;
+
+        for (uint32_t i = 0; i < static_cast<uint32_t>(m_actors.size()); i++)
+        {
+            PxRigidActor* actor = static_cast<PxRigidActor*>(m_actors[i]);
+            if (!actor)
+                continue;
+
+            PxShape* shape = nullptr;
+            if (actor->getNbShapes() == 0)
+                continue;
+            actor->getShapes(&shape, 1);
+            if (!shape)
+                continue;
+
+            switch (m_body_type)
+            {
+                case BodyType::Box:
+                    shape->setGeometry(PxBoxGeometry(scale.x * 0.5f, scale.y * 0.5f, scale.z * 0.5f));
+                    break;
+                case BodyType::Sphere:
+                {
+                    float radius = max(max(scale.x, scale.y), scale.z) * 0.5f;
+                    shape->setGeometry(PxSphereGeometry(radius));
+                    break;
+                }
+                case BodyType::Capsule:
+                {
+                    float radius      = max(scale.x, scale.z) * 0.5f;
+                    float half_height = scale.y * 0.5f;
+                    shape->setGeometry(PxCapsuleGeometry(radius, half_height));
+                    break;
+                }
+                default:
+                    break;
+            }
         }
     }
 

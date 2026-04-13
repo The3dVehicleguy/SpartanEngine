@@ -85,14 +85,14 @@ struct FrameBufferData
     SHARED_FLOAT camera_last_movement_time;
     SHARED_FLOAT hdr_enabled;
     SHARED_FLOAT hdr_max_nits;
-    SHARED_FLOAT padding;
+    SHARED_FLOAT restir_pt_debug_mode;
 
     SHARED_FLOAT3 camera_position_previous;
     SHARED_FLOAT  resolution_scale;
 
     SHARED_DOUBLE time;
     SHARED_FLOAT  camera_fov;
-    SHARED_FLOAT  padding2;
+    SHARED_FLOAT  restir_pt_scale;
 
     SHARED_FLOAT3 wind;
     SHARED_FLOAT  gamma;
@@ -103,7 +103,7 @@ struct FrameBufferData
     // clouds
     SHARED_FLOAT cloud_coverage;
     SHARED_FLOAT cloud_shadows;
-    SHARED_FLOAT padding3;
+    SHARED_FLOAT restir_pt_light_count;
     SHARED_FLOAT padding4;
 
     // vr stereo - right eye matrices (left eye uses the primary matrices above)
@@ -177,7 +177,7 @@ struct MaterialParameters
     SHARED_FLOAT sheen;
     SHARED_FLOAT local_height    SHARED_DEFAULT(0.0f);
     SHARED_FLOAT world_space_uv  SHARED_DEFAULT(0.0f);
-    SHARED_FLOAT padding2;
+    SHARED_FLOAT uv_rotation    SHARED_DEFAULT(0.0f);
 
     SHARED_FLOAT anisotropic;
     SHARED_FLOAT anisotropic_rotation;
@@ -303,16 +303,16 @@ struct EmitterParams
 #ifdef __cplusplus
 namespace spartan
 {
-    using Cb_Frame          = FrameBufferData;
-    using Pcb_Pass          = PassBufferData;
-    using Sb_Material       = MaterialParameters;
-    using Sb_Light          = LightParameters;
-    using Sb_Aabb           = Aabb;
-    using Sb_GeometryInfo   = GeometryInfo;
+    using Cb_Frame            = FrameBufferData;
+    using Pcb_Pass            = PassBufferData;
+    using Sb_Material         = MaterialParameters;
+    using Sb_Light            = LightParameters;
+    using Sb_Aabb             = Aabb;
+    using Sb_GeometryInfo     = GeometryInfo;
     using Sb_IndirectDrawArgs = IndirectDrawArgs;
-    using Sb_DrawData       = DrawData;
-    using Sb_Particle       = Particle;
-    using Sb_EmitterParams  = EmitterParams;
+    using Sb_DrawData         = DrawData;
+    using Sb_Particle         = Particle;
+    using Sb_EmitterParams    = EmitterParams;
 }
 #else
 // hlsl backward compatibility alias

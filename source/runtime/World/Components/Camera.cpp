@@ -536,6 +536,7 @@ namespace spartan
         bool mouse_click_right_down = Input::GetKeyDown(KeyCode::Click_Right);
         bool mouse_click_right      = Input::GetKey(KeyCode::Click_Right);
         bool mouse_click_left_down  = Input::GetKeyDown(KeyCode::Click_Left);
+        bool is_playing            = Engine::IsFlagSet(EngineMode::Playing);
 
         // if the camera is parented to an entity with a physics body, we will control that instead
         Physics* physics_body = nullptr;
@@ -547,21 +548,88 @@ namespace spartan
             }
         }
 
+        auto update_flashlight = [&]()
+        {
+            if (!m_flashlight && !is_playing && !GetFlag(CameraFlags::Flashlight) && !button_flashlight)
+                return;
+
+            // create flashlight entity once
+            if (!m_flashlight)
+            {
+                // entity
+                m_flashlight = World::CreateEntity();
+                m_flashlight->SetObjectName("flashlight");
+                m_flashlight->SetTransient(true); // don't serialize - dynamically created
+                m_flashlight->SetParent(GetEntity());
+                m_flashlight->SetRotationLocal(Quaternion::Identity);
+
+                // component
+                Light* light = m_flashlight->AddComponent<Light>();
+                light->SetLightType(LightType::Spot);
+                light->SetColor(Color(1.0f, 1.0f, 1.0f, 1.0f));
+                light->SetRange(100.0f);
+                light->SetIntensity(2000.0f);
+                light->SetAngle(30.0f * math::deg_to_rad);
+                light->SetFlag(LightFlags::Volumetric, false);
+                light->SetFlag(LightFlags::ShadowsScreenSpace, false);
+                light->SetFlag(LightFlags::Shadows, true);
+            }
+
+            // toggle
+            if (button_flashlight && is_playing)
+            {
+                SetFlag(CameraFlags::Flashlight, !GetFlag(CameraFlags::Flashlight));
+            }
+
+            // ensure flashlight follows camera and respects active state
+            if (m_flashlight)
+            {
+                // ensure parent is set (in case camera entity was recreated)
+                if (m_flashlight->GetParent() != GetEntity())
+                {
+                    m_flashlight->SetParent(GetEntity());
+                    m_flashlight->SetRotationLocal(Quaternion::Identity);
+                }
+
+                // keep the entity active so the world keeps tracking the light,
+                // then use intensity to control whether it contributes
+                bool flashlight_enabled = GetFlag(CameraFlags::Flashlight);
+                m_flashlight->SetActive(true);
+                
+                if (Light* light = m_flashlight->GetComponent<Light>())
+                {
+                    // set intensity to 0 when off, restore to 2000 when on
+                    light->SetIntensity(flashlight_enabled ? 2000.0f : 0.0f);
+                }
+            }
+        };
+
         // skip fps control if the physics body is disabled (e.g. when in a vehicle)
         if (physics_body && !physics_body->IsEnabled())
+        {
+            // keep non-movement camera features working while the controller is disabled
+            update_flashlight();
             return;
+        }
 
         // deduce all states into booleans (some states exists as part of the class, so no need to deduce here)
         bool mouse_in_viewport    = Input::GetMouseIsInViewport();
         bool is_controlled        = GetFlag(CameraFlags::IsControlled);
         bool wants_cursor_hidden  = GetFlag(CameraFlags::WantsCursorHidden);
         bool is_gamepad_connected = Input::IsGamepadConnected();
-        bool is_playing           = Engine::IsFlagSet(EngineMode::Playing);
         bool has_physics_body     = physics_body != nullptr;
         bool is_grounded          = has_physics_body ? physics_body->IsGrounded() : false;
         bool is_crouching         = button_crouch && is_grounded;
         m_is_walking              = (button_move_forward || button_move_backward || button_move_left || button_move_right) && is_grounded;
-        
+
+        // when transitioning from editor to play mode, snap the camera back to the
+        // controller's eye height so any free-fly offset accumulated in editor is reset
+        if (is_playing && !m_was_playing && has_physics_body && physics_body->GetBodyType() == BodyType::Controller)
+        {
+            GetEntity()->SetPositionLocal(physics_body->GetControllerTopLocal());
+        }
+        m_was_playing = is_playing;
+
         // behavior: control activation and cursor handling
         {
             bool control_initiated  = mouse_click_right_down && mouse_in_viewport;
@@ -785,6 +853,13 @@ namespace spartan
             else if (has_physics_body)
             {
                 physics_body->Move(m_movement_speed);
+
+                // keep the camera at eye height on the controller capsule so flying in
+                // editor mode doesn't let the local offset drift from the proper position
+                if (physics_body->GetBodyType() == BodyType::Controller)
+                {
+                    GetEntity()->SetPositionLocal(physics_body->GetControllerTopLocal());
+                }
             }
             else
             {
@@ -793,56 +868,7 @@ namespace spartan
         }
 
         // behavior: flashlight
-        {
-            // create flashlight entity once
-            if (!m_flashlight)
-            {
-                // entity
-                m_flashlight = World::CreateEntity();
-                m_flashlight->SetObjectName("flashlight");
-                m_flashlight->SetTransient(true); // don't serialize - dynamically created
-                m_flashlight->SetParent(GetEntity());
-                m_flashlight->SetRotationLocal(Quaternion::Identity);
-
-                // component
-                Light* light = m_flashlight->AddComponent<Light>();
-                light->SetLightType(LightType::Spot);
-                light->SetColor(Color(1.0f, 1.0f, 1.0f, 1.0f));
-                light->SetRange(100.0f);
-                light->SetIntensity(2000.0f);
-                light->SetAngle(30.0f * math::deg_to_rad);
-                light->SetFlag(LightFlags::Volumetric, false);
-                light->SetFlag(LightFlags::ShadowsScreenSpace, false);
-                light->SetFlag(LightFlags::Shadows, true);
-            }
-
-            // toggle
-            if (button_flashlight && is_playing)
-            {
-                SetFlag(CameraFlags::Flashlight, !GetFlag(CameraFlags::Flashlight));
-            }
-
-            // ensure flashlight follows camera and respects active state
-            if (m_flashlight)
-            {
-                // ensure parent is set (in case camera entity was recreated)
-                if (m_flashlight->GetParent() != GetEntity())
-                {
-                    m_flashlight->SetParent(GetEntity());
-                    m_flashlight->SetRotationLocal(Quaternion::Identity);
-                }
-
-                // set active state and intensity based on flag
-                bool flashlight_enabled = GetFlag(CameraFlags::Flashlight);
-                m_flashlight->SetActive(flashlight_enabled);
-                
-                if (Light* light = m_flashlight->GetComponent<Light>())
-                {
-                    // set intensity to 0 when off, restore to 2000 when on
-                    light->SetIntensity(flashlight_enabled ? 2000.0f : 0.0f);
-                }
-            }
-        }
+        update_flashlight();
 
         // behaviour: shoot (physics boxes for now)
         if (mouse_click_left_down && mouse_click_right && mouse_in_viewport && is_playing)

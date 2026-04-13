@@ -58,6 +58,12 @@ namespace spartan
         custom           // custom intensity
     };
 
+    enum class LightIntensityUnit
+    {
+        Lux,
+        Lumens
+    };
+
     enum class LightPreset
     {
         dawn,        // sunrise - early morning with warm orange glow
@@ -108,11 +114,14 @@ namespace spartan
         const Color& GetColor() const { return m_color_rgb; }
 
         // intensity
-        void SetIntensity(const float lumens_lux);
+        void SetIntensity(const float photometric_intensity);
         void SetIntensity(const LightIntensity intensity);
-        float GetIntensityLumens() const    { return m_intensity_lumens_lux; }
-        LightIntensity GetIntensity() const { return m_intensity; }
-        float GetIntensityWatt() const;
+        float GetIntensityPhotometric() const { return m_intensity_photometric; }
+        float GetIntensityLumens() const      { return m_intensity_photometric; } // legacy alias
+        LightIntensity GetIntensity() const   { return m_intensity; }
+        LightIntensityUnit GetIntensityUnit() const;
+        float GetIntensityRadiometric() const;
+        float GetIntensityWatt() const { return GetIntensityRadiometric(); } // legacy alias
 
         // preset
         void SetPreset(const LightPreset preset);
@@ -143,8 +152,8 @@ namespace spartan
         uint32_t GetIndex() const           { return m_index; }
 
         // screen space shadows slice index
-        void SetScreenSpaceShadowsSliceIndex(const uint32_t index) { m_index = index; }
-        uint32_t GetScreenSpaceShadowsSliceIndex() const           { return m_index; }
+        void SetScreenSpaceShadowsSliceIndex(const uint32_t index) { m_screen_space_shadows_slice_index = index; }
+        uint32_t GetScreenSpaceShadowsSliceIndex() const           { return m_screen_space_shadows_slice_index; }
 
         // draw distance
         void SetDrawDistance(const float distance) { m_draw_distance = distance; }
@@ -170,7 +179,7 @@ namespace spartan
 
         // properties
         LightIntensity m_intensity       = LightIntensity::bulb_500_watt;
-        float m_intensity_lumens_lux     = 2600.0f;
+        float m_intensity_photometric    = 2600.0f;
         uint32_t m_flags                 = 0;
         LightType m_light_type           = LightType::Max;
         Color m_color_rgb                = Color::standard_black;
@@ -181,6 +190,7 @@ namespace spartan
         float m_area_width               = 1.0f;  // area light width in meters
         float m_area_height              = 1.0f;  // area light height in meters
         uint32_t m_index                 = 0;
+        uint32_t m_screen_space_shadows_slice_index = 0;
         math::BoundingBox m_bounding_box = math::BoundingBox::Zero;
         math::Vector3 m_far_cascade_min  = math::Vector3::Zero;
         math::Vector3 m_far_cascade_max  = math::Vector3::Zero;

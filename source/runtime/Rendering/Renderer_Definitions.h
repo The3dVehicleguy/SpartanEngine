@@ -117,11 +117,6 @@ namespace spartan
         reservoir2    = 23,
         reservoir3    = 24,
         reservoir4    = 25,
-        // nrd output bindings
-        nrd_viewz              = 26,
-        nrd_normal_roughness   = 27,
-        nrd_diff_radiance      = 28,
-        nrd_spec_radiance      = 29,
         // integer format textures (vrs, etc)
         tex_uint               = 30,
         // gpu-driven indirect drawing
@@ -207,13 +202,13 @@ namespace spartan
         restir_pt_ray_hit_r,
         restir_pt_temporal_c,
         restir_pt_spatial_c,
+        restir_pt_denoise_temporal_c,
+        restir_pt_denoise_spatial_c,
         // volumetric clouds
         cloud_noise_shape_c,
         cloud_noise_detail_c,
         cloud_shadow_c,
         light_reflections_c,
-        // nrd denoiser
-        nrd_prepare_c,
         // gpu-driven indirect rendering
         indirect_cull_c,
         gbuffer_indirect_v,
@@ -269,6 +264,9 @@ namespace spartan
         ray_traced_shadows,
         // restir path tracing output
         restir_output,
+        restir_denoised,
+        restir_denoised_history,
+        restir_denoised_ping,
         // restir reservoir buffers (current frame)
         restir_reservoir0,
         restir_reservoir1,
@@ -291,13 +289,6 @@ namespace spartan
         cloud_noise_shape,
         cloud_noise_detail,
         cloud_shadow,
-        // nrd denoiser textures
-        nrd_viewz,
-        nrd_normal_roughness,
-        nrd_diff_radiance_hitdist,
-        nrd_spec_radiance_hitdist,
-        nrd_out_diff_radiance_hitdist,
-        nrd_out_spec_radiance_hitdist,
         // debug
         debug_output,
         // vr stereo

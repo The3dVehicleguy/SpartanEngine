@@ -22,6 +22,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //= INCLUDES =====================
 #include "pch.h"
 #include "GeneralWindows.h"
+#include "WorldPreviews.h"
 #include "Windows/WorldSelector.h"
 #include "Windows/Contributors.h"
 #include "ImGui/Source/imgui.h"
@@ -246,7 +247,6 @@ namespace
             { "Intel XeSS",                  "2.1.0",      "https://github.com/intel/xess"                                    },
             { "Lua",                         "5.5.0",      "https://www.lua.org/"                                             },
             { "meshoptimizer",               "0.25",       "https://github.com/zeux/meshoptimizer"                            },
-            { "NVIDIA NRD",                  "4.16.1",     "https://github.com/NVIDIAGameWorks/RayTracingDenoiser"            },
             { "OpenXR",                      "1.1.54",     "https://www.khronos.org/openxr/"                                  },
             { "PhysX",                       "5.6.0",      "https://github.com/NVIDIA-Omniverse/PhysX"                        },
             { "pugixml",                     "1.13",       "https://github.com/zeux/pugixml"                                  },
@@ -561,6 +561,8 @@ void GeneralWindows::Initialize(Editor* editor_in)
 
 void GeneralWindows::Tick()
 {
+    WorldPreviews::Tick();
+
     // show the world selector after the welcome window has been dismissed
     static bool welcome_was_visible = welcome::visible;
     if (welcome_was_visible && !welcome::visible)

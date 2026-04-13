@@ -295,7 +295,7 @@ namespace spartan
             {
                 RHI_Image_Layout layout = RHI_Image_Layout::Transfer_Destination;
         
-                cmd_list->InsertBarrier(texture->GetRhiResource(), texture->GetFormat(), 0, mip_count, depth, layout);
+                cmd_list->InsertBarrier(texture, layout, 0, mip_count);
                 cmd_list->FlushBarriers();
         
                 vkCmdCopyBufferToImage(
@@ -308,6 +308,8 @@ namespace spartan
                 );
         
                 RHI_CommandList::ImmediateExecutionEnd(cmd_list);
+
+                SP_ASSERT_MSG(texture->GetLayout(0) != RHI_Image_Layout::Max, "Layout not set after staging barrier");
             }
             Breadcrumbs::EndMarker(); // buffer_to_image
         
@@ -364,17 +366,12 @@ namespace spartan
                 target_layout = RHI_Image_Layout::General;
             }
 
-            cmd_list->InsertBarrier(
-                m_rhi_resource,
-                m_format,
-                0,            // mip start
-                m_mip_count,  // mip count
-                array_length, // array length
-                target_layout
-            );
+            cmd_list->InsertBarrier(this, target_layout, 0, m_mip_count);
         
             // flush
             RHI_CommandList::ImmediateExecutionEnd(cmd_list);
+
+            SP_ASSERT_MSG(GetLayout(0) != RHI_Image_Layout::Max, "Layout not set after transition");
         }
         Breadcrumbs::EndMarker(); // layout_transition
 
@@ -495,8 +492,65 @@ namespace spartan
         m_rhi_dsv_multiview = nullptr;
 
         // rhi resource
-        RHI_CommandList::RemoveLayout(m_rhi_resource);
+        ClearLayouts();
         RHI_Device::DeletionQueueAdd(RHI_Resource_Type::Image, m_rhi_resource);
         m_rhi_resource = nullptr;
+    }
+
+    void RHI_Texture::DestroyResourceImmediate()
+    {
+        if (m_rhi_srv)
+        {
+            vkDestroyImageView(RHI_Context::device, static_cast<VkImageView>(m_rhi_srv), nullptr);
+            m_rhi_srv = nullptr;
+        }
+
+        for (uint32_t i = 0; i < m_mip_count; i++)
+        {
+            if (m_rhi_srv_mips[i])
+            {
+                vkDestroyImageView(RHI_Context::device, static_cast<VkImageView>(m_rhi_srv_mips[i]), nullptr);
+                m_rhi_srv_mips[i] = nullptr;
+            }
+        }
+
+        for (uint32_t i = 0; i < rhi_max_render_target_count; i++)
+        {
+            if (m_rhi_srv_layers[i])
+            {
+                vkDestroyImageView(RHI_Context::device, static_cast<VkImageView>(m_rhi_srv_layers[i]), nullptr);
+                m_rhi_srv_layers[i] = nullptr;
+            }
+
+            if (m_rhi_dsv[i])
+            {
+                vkDestroyImageView(RHI_Context::device, static_cast<VkImageView>(m_rhi_dsv[i]), nullptr);
+                m_rhi_dsv[i] = nullptr;
+            }
+
+            if (m_rhi_rtv[i])
+            {
+                vkDestroyImageView(RHI_Context::device, static_cast<VkImageView>(m_rhi_rtv[i]), nullptr);
+                m_rhi_rtv[i] = nullptr;
+            }
+        }
+
+        if (m_rhi_rtv_multiview)
+        {
+            vkDestroyImageView(RHI_Context::device, static_cast<VkImageView>(m_rhi_rtv_multiview), nullptr);
+            m_rhi_rtv_multiview = nullptr;
+        }
+
+        if (m_rhi_dsv_multiview)
+        {
+            vkDestroyImageView(RHI_Context::device, static_cast<VkImageView>(m_rhi_dsv_multiview), nullptr);
+            m_rhi_dsv_multiview = nullptr;
+        }
+
+        ClearLayouts();
+        if (m_rhi_resource)
+        {
+            RHI_Device::MemoryTextureDestroy(m_rhi_resource);
+        }
     }
 }
